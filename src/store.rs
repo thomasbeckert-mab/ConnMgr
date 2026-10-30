@@ -39,15 +39,26 @@ pub struct Settings {
     pub language: Option<Language>,
     #[serde(default)]
     pub theme: Theme,
+    /// Letzte Schnellverbindungen (nur Adressen, keine Passwörter), neueste zuerst.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quick_history: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { tree_pinned: true, language: None, theme: Theme::System }
+        Self { tree_pinned: true, language: None, theme: Theme::System, quick_history: Vec::new() }
     }
 }
 
 impl Settings {
+    const QUICK_HISTORY_LEN: usize = 10;
+
+    pub fn remember_quick(&mut self, input: &str) {
+        self.quick_history.retain(|entry| entry != input);
+        self.quick_history.insert(0, input.to_owned());
+        self.quick_history.truncate(Self::QUICK_HISTORY_LEN);
+    }
+
     pub fn effective_language(&self) -> Language {
         self.language.unwrap_or_else(Language::system)
     }

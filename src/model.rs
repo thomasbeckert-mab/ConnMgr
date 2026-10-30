@@ -533,6 +533,61 @@ pub fn validate_username(user: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Ziel einer Schnellverbindung (ohne gespeicherten Eintrag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickTarget {
+    pub protocol: Protocol,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+}
+
+/// Versteht `rdp://host`, `ssh://user@host:2222`, `user@host`, `host:3389`, `[::1]:22` usw.
+/// Ohne Schema entscheidet der Port: 3389 = RDP, 5900–5999 = VNC, sonst SSH.
+pub fn parse_quick(input: &str) -> Result<QuickTarget, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(t!("Bitte eine Adresse eingeben", "Please enter an address"));
+    }
+    let (scheme, rest) = match input.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme.to_lowercase()), rest),
+        None => (None, input),
+    };
+    let explicit = match scheme.as_deref() {
+        None => None,
+        Some("ssh") => Some(Protocol::Ssh),
+        Some("sftp") => Some(Protocol::Sftp),
+        Some("rdp") => Some(Protocol::Rdp),
+        Some("vnc") => Some(Protocol::Vnc),
+        Some(other) => return Err(t!("Unbekanntes Protokoll: {other}", "Unknown protocol: {other}")),
+    };
+    let rest = rest.trim_end_matches('/');
+    let (username, host_port) = match rest.rsplit_once('@') {
+        Some((user, host)) => (user.to_owned(), host),
+        None => (String::new(), rest),
+    };
+    let invalid_port = |p: &str| t!("Ungültiger Port: {p}", "Invalid port: {p}");
+    let parse_port = |p: &str| p.parse::<u16>().ok().filter(|&p| p > 0).ok_or_else(|| invalid_port(p));
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, after) = bracketed.split_once(']').ok_or_else(|| t!("Fehlende „]“", "Missing \"]\""))?;
+        (host, after.strip_prefix(':').map(parse_port).transpose()?)
+    } else if host_port.matches(':').count() == 1 {
+        let (host, port) = host_port.split_once(':').expect("ein Doppelpunkt");
+        (host, Some(parse_port(port)?))
+    } else {
+        // Ohne Klammern ist eine IPv6-Adresse nur Host, nicht Host:Port.
+        (host_port, None)
+    };
+    let protocol = explicit.unwrap_or(match port {
+        Some(3389) => Protocol::Rdp,
+        Some(p) if (5900..=5999).contains(&p) => Protocol::Vnc,
+        _ => Protocol::Ssh,
+    });
+    validate_host(host)?;
+    validate_username(&username)?;
+    Ok(QuickTarget { protocol, host: host.to_owned(), port: port.unwrap_or(protocol.default_port()), username })
+}
+
 pub fn parse_color(hex: &str) -> Option<[u8; 3]> {
     let hex = hex.strip_prefix('#')?;
     if hex.len() != 6 {
@@ -706,6 +761,25 @@ pub mod tests {
         c.host = "::1".into();
         c.port = 3389;
         assert_eq!(c.host_port(), "[::1]:3389");
+    }
+
+    #[test]
+    fn quick_connect_parsing() {
+        let q = |input: &str| parse_quick(input).map(|t| (t.protocol, t.host, t.port, t.username));
+        assert_eq!(q("rdp://server"), Ok((Protocol::Rdp, "server".into(), 3389, String::new())));
+        assert_eq!(q("ssh://admin@10.0.0.5:2222"), Ok((Protocol::Ssh, "10.0.0.5".into(), 2222, "admin".into())));
+        assert_eq!(q("admin@web01"), Ok((Protocol::Ssh, "web01".into(), 22, "admin".into())));
+        assert_eq!(q("host:3389"), Ok((Protocol::Rdp, "host".into(), 3389, String::new())));
+        assert_eq!(q("host:5901"), Ok((Protocol::Vnc, "host".into(), 5901, String::new())));
+        assert_eq!(q("SFTP://host/"), Ok((Protocol::Sftp, "host".into(), 22, String::new())));
+        assert_eq!(q("[::1]:2222"), Ok((Protocol::Ssh, "::1".into(), 2222, String::new())));
+        assert_eq!(q("fe80::1"), Ok((Protocol::Ssh, "fe80::1".into(), 22, String::new())));
+        assert_eq!(q("FIRMA\\admin@dc01:3389"), Ok((Protocol::Rdp, "dc01".into(), 3389, "FIRMA\\admin".into())));
+        assert!(q("").is_err());
+        assert!(q("http://x").is_err());
+        assert!(q("host:0").is_err());
+        assert!(q("host:abc").is_err());
+        assert!(q("-oProxyCommand=x").is_err());
     }
 
     #[test]

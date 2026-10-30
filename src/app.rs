@@ -62,6 +62,8 @@ struct Session {
     /// Ausgeblendeter Baum gerade eingeblendet (nur wenn nicht fixiert) und wann er wieder verschwindet.
     tree_overlay: bool,
     tree_hide_at: Option<Instant>,
+    /// Eingabe im Schnellverbindungsfeld.
+    quick_input: String,
     /// Offene SSH-Sitzungen; beim Sperren werden sie mit der Session getrennt.
     tabs: Vec<Tab>,
     /// `None` = Eigenschaften-Tab.
@@ -123,6 +125,8 @@ struct Tab {
     tooltip: String,
     color: Option<Color32>,
     content: TabContent,
+    /// Schnellverbindung ohne Eintrag im Baum; bleibt hier für Neuverbinden und Speichern.
+    adhoc: Option<Connection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +310,10 @@ enum Action {
     CloseProperties,
     /// Zusätzliche Sitzung, auch wenn schon ein Tab für die Verbindung offen ist.
     ConnectNew(String),
+    /// Schnellverbindung zu einer eingetippten Adresse.
+    QuickConnect(String),
+    /// Schnellverbindung des Tabs als Eintrag im Baum speichern.
+    SaveAdhoc(usize),
     ToggleTreePin,
     /// `None` = Sprache des Betriebssystems.
     SetLanguage(Option<Language>),
@@ -360,12 +368,16 @@ impl ConMgrApp {
             },
             Action::ConnectExternal(id) => self.connect(&id),
             Action::OpenSftp(id) => self.open_tab(ctx, &id, TabKind::Sftp, None),
+            Action::QuickConnect(input) => self.quick_connect(ctx, &input),
             Action::Reconnect(index) => match &self.state {
                 State::Unlocked(s) => match s.tabs.get(index) {
-                    Some(tab) => {
-                        let (id, kind) = (tab.conn_id.clone(), tab.kind());
-                        self.open_tab(ctx, &id, kind, Some(index))
-                    }
+                    Some(tab) => match tab.adhoc.clone() {
+                        Some(conn) => self.open_adhoc_tab(ctx, conn, Some(index)),
+                        None => {
+                            let (id, kind) = (tab.conn_id.clone(), tab.kind());
+                            self.open_tab(ctx, &id, kind, Some(index))
+                        }
+                    },
                     None => Ok(()),
                 },
                 State::Locked(_) => Ok(()),
@@ -411,6 +423,7 @@ impl ConMgrApp {
                     editor: None,
                     tree_overlay: false,
                     tree_hide_at: None,
+                    quick_input: String::new(),
                     tabs: Vec::new(),
                     active_tab: None,
                     dialog: None,
@@ -452,11 +465,65 @@ impl ConMgrApp {
 
     /// Öffnet eine eingebettete Sitzung in einem neuen Tab oder ersetzt die in `replace`.
     fn open_tab(&mut self, ctx: &egui::Context, id: &str, kind: TabKind, replace: Option<usize>) -> Result<()> {
-        let runtime = self.runtime()?.handle().clone();
-        let State::Unlocked(session) = &mut self.state else { bail!(t!("Gesperrt", "Locked")) };
+        let State::Unlocked(session) = &self.state else { bail!(t!("Gesperrt", "Locked")) };
         let node = model::find(&session.store.items, id).ok_or_else(|| anyhow!(t!("Verbindung nicht gefunden", "Connection not found")))?;
         let Node::Connection(conn) = node else { bail!(t!("Kein Verbindungseintrag", "Not a connection")) };
-        let Effective { username, password, private_key, passphrase } = session.credentials_for(conn)?;
+        let credentials = session.credentials_for(conn)?;
+        let look = (node.icon().to_owned(), node.color().and_then(model::parse_color).map(|[r, g, b]| Color32::from_rgb(r, g, b)));
+        let conn = conn.clone();
+        self.start_tab(ctx, conn, credentials, kind, look, None, replace)
+    }
+
+    /// Schnellverbindung: Adresse verstehen, Tab öffnen, Eingabe für den Verlauf merken.
+    fn quick_connect(&mut self, ctx: &egui::Context, input: &str) -> Result<()> {
+        let target = model::parse_quick(input).map_err(|e| anyhow!(e))?;
+        let conn = Connection {
+            id: format!("quick:{}", new_id()),
+            name: input.trim().trim_end_matches('/').to_owned(),
+            host: target.host,
+            port: target.port,
+            protocol: target.protocol,
+            credentials: CredentialSource::Own,
+            username: target.username,
+            password: None,
+            icon: None,
+            color: None,
+            favorite: false,
+        };
+        self.open_adhoc_tab(ctx, conn, None)?;
+        if let State::Unlocked(session) = &mut self.state {
+            session.store.settings.remember_quick(input.trim());
+            session.store.save(&self.path)?;
+        }
+        Ok(())
+    }
+
+    fn open_adhoc_tab(&mut self, ctx: &egui::Context, conn: Connection, replace: Option<usize>) -> Result<()> {
+        let kind = match conn.protocol {
+            Protocol::Ssh => TabKind::Terminal,
+            Protocol::Sftp => TabKind::Sftp,
+            Protocol::Rdp => TabKind::Rdp,
+            Protocol::Vnc => TabKind::Vnc,
+        };
+        // Fehlende Angaben (Passwort, bei RDP auch der Benutzer) fragt der Tab ab.
+        let credentials = Effective { username: conn.username.clone(), ..Effective::default() };
+        self.start_tab(ctx, conn.clone(), credentials, kind, ("⚡".to_owned(), None), Some(conn), replace)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_tab(
+        &mut self,
+        ctx: &egui::Context,
+        conn: Connection,
+        credentials: Effective,
+        kind: TabKind,
+        (icon, color): (String, Option<Color32>),
+        adhoc: Option<Connection>,
+        replace: Option<usize>,
+    ) -> Result<()> {
+        let runtime = self.runtime()?.handle().clone();
+        let State::Unlocked(session) = &mut self.state else { bail!(t!("Gesperrt", "Locked")) };
+        let Effective { username, password, private_key, passphrase } = credentials;
         model::validate_host(&conn.host).map_err(|e| anyhow!(e))?;
         model::validate_username(&username).map_err(|e| anyhow!(e))?;
 
@@ -464,7 +531,7 @@ impl ConMgrApp {
         let params = ConnectParams { host: conn.host.clone(), port: conn.port, username, password, private_key, passphrase };
         let (title, content) = match kind {
             TabKind::Terminal => (
-                format!("{}  {}", node.icon(), conn.name),
+                format!("{icon}  {}", conn.name),
                 TabContent::Terminal { session: SshSession::start(&runtime, ctx.clone(), params), view: TerminalView::default() },
             ),
             TabKind::Sftp => (
@@ -474,25 +541,19 @@ impl ConMgrApp {
             TabKind::Rdp => {
                 let params = RdpParams { host: params.host, port: params.port, username: params.username, password: params.password };
                 (
-                    format!("{}  {}", node.icon(), conn.name),
+                    format!("{icon}  {}", conn.name),
                     TabContent::Rdp { session: RdpSession::start(&runtime, ctx.clone(), params), view: RdpView::default() },
                 )
             }
             TabKind::Vnc => {
                 let params = VncParams { host: params.host, port: params.port, password: params.password };
                 (
-                    format!("{}  {}", node.icon(), conn.name),
+                    format!("{icon}  {}", conn.name),
                     TabContent::Vnc { session: VncSession::start(&runtime, ctx.clone(), params), view: VncView::default() },
                 )
             }
         };
-        let tab = Tab {
-            conn_id: conn.id.clone(),
-            title,
-            tooltip,
-            color: node.color().and_then(model::parse_color).map(|[r, g, b]| Color32::from_rgb(r, g, b)),
-            content,
-        };
+        let tab = Tab { conn_id: conn.id.clone(), title, tooltip, color, content, adhoc };
         self.status = t!("{}: verbinde …", "{}: connecting …", conn.name);
         self.status_conn = Some((conn.id.clone(), conn.name.clone()));
         let index = match replace {
@@ -675,6 +736,23 @@ impl Session {
                 self.store.save(path)?;
                 Ok(None)
             }
+            Action::SaveAdhoc(index) => {
+                let parent = self.default_parent();
+                let Some(tab) = self.tabs.get_mut(index) else { return Ok(None) };
+                let Some(mut conn) = tab.adhoc.take() else { return Ok(None) };
+                conn.id = new_id();
+                tab.conn_id = conn.id.clone();
+                tab.title = format!("{}  {}", conn.protocol.default_icon(), conn.name);
+                let name = conn.name.clone();
+                let id = conn.id.clone();
+                let target = parent.map_or(Target::Root, Target::Into);
+                if let Err(node) = model::insert(&mut self.store.items, &target, Node::Connection(conn)) {
+                    self.store.items.push(node);
+                }
+                self.store.save(path)?;
+                self.mark(&id);
+                Ok(Some(t!("„{name}“ gespeichert", "\"{name}\" saved")))
+            }
             Action::ToggleTreePin => {
                 self.store.settings.tree_pinned = !self.store.settings.tree_pinned;
                 self.tree_overlay = false;
@@ -726,6 +804,7 @@ impl Session {
             | Action::ConnectExternal(_)
             | Action::Reconnect(_)
             | Action::OpenSftp(_)
+            | Action::QuickConnect(_)
             | Action::ConnectNew(_)
             | Action::CopyPassword(_) => Ok(None),
         }
@@ -1053,7 +1132,9 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                 action = Some(Action::New(Kind::Credential, parent));
             }
             ui.separator();
-            ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text(ts!("🔍 Suchen …", "🔍 Search …")).desired_width(180.0));
+            ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text(ts!("🔍 Suchen …", "🔍 Search …")).desired_width(150.0));
+            ui.separator();
+            quick_connect_field(ui, s, &mut action);
             ui.toggle_value(&mut s.favorites_only, ts!("⭐ Favoriten", "⭐ Favorites"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(ts!("🔒 Sperren", "🔒 Lock")).clicked() {
@@ -1297,6 +1378,39 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
     }
 }
 
+/// Schnellverbindung: Adresse eintippen, Enter verbindet; ⌘K/Strg+K springt ins Feld, ▾ zeigt den Verlauf.
+fn quick_connect_field(ui: &mut egui::Ui, s: &mut Session, action: &mut Option<Action>) {
+    let id = egui::Id::new("quick_connect");
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut s.quick_input)
+            .id(id)
+            .hint_text(ts!("⚡ Schnellverbindung (⌘K)", "⚡ Quick connect (⌘K)"))
+            .desired_width(200.0),
+    );
+    let field = field.on_hover_text(ts!(
+        "z. B. rdp://server, admin@host, vnc://host:5901, host:3389 — Enter verbindet",
+        "e.g. rdp://server, admin@host, vnc://host:5901, host:3389 — Enter connects"
+    ));
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !s.quick_input.trim().is_empty() {
+        *action = Some(Action::QuickConnect(std::mem::take(&mut s.quick_input)));
+    }
+    if !s.store.settings.quick_history.is_empty() {
+        ui.menu_button("▾", |ui| {
+            for entry in &s.store.settings.quick_history {
+                if ui.button(entry).clicked() {
+                    *action = Some(Action::QuickConnect(entry.clone()));
+                    ui.close_menu();
+                }
+            }
+        })
+        .response
+        .on_hover_text(ts!("Letzte Schnellverbindungen", "Recent quick connections"));
+    }
+}
+
 /// Hintergrund, solange keine Sitzung und keine Eigenschaften offen sind: Logo, Name und Hinweis.
 fn empty_background(ui: &mut egui::Ui) {
     let size = (ui.available_height() * 0.35).clamp(96.0, 220.0);
@@ -1417,6 +1531,11 @@ fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
         let label = ui.selectable_label(s.active_tab == Some(index), title).on_hover_text(&tab.tooltip);
         if label.clicked() {
             *action = Some(Action::ActivateTab(Some(index)));
+        }
+        if tab.adhoc.is_some()
+            && ui.small_button("💾").on_hover_text(ts!("Als Verbindung im Baum speichern", "Save as connection in the tree")).clicked()
+        {
+            *action = Some(Action::SaveAdhoc(index));
         }
         if label.middle_clicked() || ui.small_button("✖").on_hover_text(ts!("Tab schließen", "Close tab")).clicked() {
             *action = Some(Action::CloseTab(index));
@@ -1891,6 +2010,7 @@ mod tests {
             editor: None,
             tree_overlay: false,
             tree_hide_at: None,
+            quick_input: String::new(),
             tabs: Vec::new(),
             active_tab: None,
             dialog: None,
@@ -2041,6 +2161,7 @@ mod tests {
             tooltip: String::new(),
             color: None,
             content: TabContent::Terminal { session, view: TerminalView::default() },
+            adhoc: None,
         });
         s.active_tab = Some(0);
         ui.frame(&mut s);
@@ -2133,6 +2254,62 @@ mod tests {
     }
 
     #[test]
+    fn quick_connect_field_with_shortcut_and_enter() {
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        ui.frame(&mut s);
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        ui.events.push(key(egui::Key::K, egui::Modifiers::COMMAND));
+        ui.frame(&mut s);
+        ui.events.push(egui::Event::Text("admin@web01".into()));
+        ui.frame(&mut s);
+        ui.events.push(key(egui::Key::Enter, egui::Modifiers::NONE));
+        // Aktion direkt abgreifen (der Treiber würde sie sonst schon anwenden).
+        let mut action = None;
+        let _ = ui.ctx.run(egui::RawInput { events: std::mem::take(&mut ui.events), ..Default::default() }, |ctx| {
+            action = session_ui(ctx, &mut s, "", &ui.path);
+        });
+        assert!(matches!(action, Some(Action::QuickConnect(ref input)) if input == "admin@web01"));
+        assert!(s.quick_input.is_empty(), "Feld nach dem Verbinden geleert");
+    }
+
+    #[test]
+    fn quick_connect_opens_adhoc_tab_and_saves_it() {
+        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("c.json");
+        let ctx = egui::Context::default();
+        let mut app = ConMgrApp::new(path.clone());
+        app.state = State::Unlocked(Box::new(session()));
+
+        app.handle(&ctx, Action::QuickConnect("admin@127.0.0.1:1".into()));
+        let State::Unlocked(s) = &app.state else { unreachable!() };
+        assert_eq!(s.tabs.len(), 1, "{}", app.status);
+        let tab = &s.tabs[0];
+        assert!(tab.title.starts_with('⚡') && tab.kind() == TabKind::Terminal);
+        let adhoc = tab.adhoc.as_ref().expect("Schnellverbindung");
+        assert_eq!((adhoc.host.as_str(), adhoc.port, adhoc.username.as_str()), ("127.0.0.1", 1, "admin"));
+        assert_eq!(s.store.settings.quick_history, ["admin@127.0.0.1:1"]);
+
+        // Neu verbinden behält die Schnellverbindung.
+        app.handle(&ctx, Action::Reconnect(0));
+        let State::Unlocked(s) = &app.state else { unreachable!() };
+        assert!(s.tabs[0].adhoc.is_some() && s.tabs.len() == 1);
+
+        // Speichern legt einen Eintrag im Baum an.
+        app.handle(&ctx, Action::SaveAdhoc(0));
+        let State::Unlocked(s) = &app.state else { unreachable!() };
+        assert!(s.tabs[0].adhoc.is_none());
+        let saved = model::find_connection(&s.store.items, &s.tabs[0].conn_id).expect("im Baum");
+        assert_eq!((saved.host.as_str(), saved.username.as_str()), ("127.0.0.1", "admin"));
+        assert!(model::find_connection(&StoreFile::load(&path).unwrap().items, &saved.id).is_some(), "in der Datei");
+
+        // Ungültige Eingabe: Fehlermeldung, kein Tab.
+        app.handle(&ctx, Action::QuickConnect("http://x".into()));
+        assert!(app.status.contains("Unbekanntes Protokoll"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn delete_key_asks_for_selected_entry() {
         let mut s = session();
         let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
@@ -2200,6 +2377,7 @@ mod tests {
             tooltip: String::new(),
             color: None,
             content: TabContent::Terminal { session, view: TerminalView::default() },
+            adhoc: None,
         });
         app.state = State::Unlocked(Box::new(s));
         app.status = "web01: verbinde …".into();
@@ -2258,6 +2436,7 @@ mod tests {
             tooltip: String::new(),
             color: None,
             content: TabContent::Terminal { session, view: TerminalView::default() },
+            adhoc: None,
         });
         s.active_tab = Some(0);
 
