@@ -125,6 +125,16 @@ Bild wird ins Fenster eingepasst; Maus (inkl. Rad) und Tastatur werden weitergeg
 
 Anmeldung: klassisches **VNC-Passwort** (aus den Zugangsdaten oder per Abfrage). Die macOS-Bildschirmfreigabe verlangt standardmäßig Apple-Anmeldung (ARD), die nicht unterstützt wird – dort *„VNC-Benutzer dürfen den Bildschirm mit Passwort steuern“* aktivieren oder extern öffnen.
 
+### Omnissa Horizon
+
+Horizon-Desktops und -Apps laufen im **Omnissa Horizon Client** (Blast/PCoIP sind proprietär und lassen sich nicht einbetten). ConnMgr startet ihn über einen `horizon-client://`-Link nach der [Omnissa-Doku](https://docs.omnissa.com/HorizonClient-MacGuide-V2512/SyntaxforCreatingURIs):
+
+- Felder: Connection Server, Port (Standard 443), **Desktop/App** (leer = Auswahl im Client), **Anzeigeprotokoll** (Standard, Blast, PCoIP).
+- Benutzer und Domäne kommen aus den Zugangsdaten (auch geerbt); `DOMÄNE\benutzer` wird zu Benutzer + `domainName`. Eine UPN (`benutzer@firma.de`) versteht der Link nicht – dann nur der Benutzerteil.
+- Ein Passwort lässt sich per Link bewusst nicht übergeben: Der Client fragt danach, ConnMgr legt es 30 s in die Zwischenablage.
+- Schnellverbindung: `horizon://view.firma.de/Finance Desktop`.
+- Start: macOS `open` (vorher Prüfung, ob der Horizon Client installiert ist), Windows URL-Handler, Linux `xdg-open`.
+
 Beendete Sitzungen lassen sich im Tab neu verbinden. **Sperren trennt alle Sitzungen.**
 
 ### Tests gegen echte Server

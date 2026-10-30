@@ -2,23 +2,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::Encrypted;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    #[default]
     Ssh,
     Sftp,
     Rdp,
     Vnc,
+    /// Omnissa (früher VMware) Horizon: startet den Horizon Client über einen `horizon-client://`-Link.
+    Horizon,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 4] = [Protocol::Ssh, Protocol::Sftp, Protocol::Rdp, Protocol::Vnc];
+    pub const ALL: [Protocol; 5] = [Protocol::Ssh, Protocol::Sftp, Protocol::Rdp, Protocol::Vnc, Protocol::Horizon];
 
     pub fn default_port(self) -> u16 {
         match self {
             Protocol::Ssh | Protocol::Sftp => 22,
             Protocol::Rdp => 3389,
             Protocol::Vnc => 5900,
+            Protocol::Horizon => 443,
         }
     }
 
@@ -28,6 +32,7 @@ impl Protocol {
             Protocol::Sftp => "SFTP",
             Protocol::Rdp => "RDP",
             Protocol::Vnc => "VNC",
+            Protocol::Horizon => "Horizon",
         }
     }
 
@@ -37,6 +42,24 @@ impl Protocol {
             Protocol::Sftp => "🗄",
             Protocol::Rdp => "🖥",
             Protocol::Vnc => "📺",
+            Protocol::Horizon => "☁",
+        }
+    }
+}
+
+/// Anzeigeprotokoll für Horizon-Desktops; `None` überlässt die Wahl dem Client bzw. Server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayProtocol {
+    Blast,
+    Pcoip,
+}
+
+impl DisplayProtocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayProtocol::Blast => "Blast",
+            DisplayProtocol::Pcoip => "PCoIP",
         }
     }
 }
@@ -54,7 +77,7 @@ pub enum CredentialSource {
     Stored { id: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Connection {
     pub id: String,
     pub name: String,
@@ -74,6 +97,11 @@ pub struct Connection {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub favorite: bool,
+    /// Horizon: Name des Desktops oder der App; leer = Auswahl im Client.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_protocol: Option<DisplayProtocol>,
 }
 
 impl Connection {
@@ -540,6 +568,8 @@ pub struct QuickTarget {
     pub host: String,
     pub port: u16,
     pub username: String,
+    /// Horizon: Desktop oder App aus dem Pfad (`horizon://server/Finance Desktop`).
+    pub resource: String,
 }
 
 /// Versteht `rdp://host`, `ssh://user@host:2222`, `user@host`, `host:3389`, `[::1]:22` usw.
@@ -559,9 +589,14 @@ pub fn parse_quick(input: &str) -> Result<QuickTarget, String> {
         Some("sftp") => Some(Protocol::Sftp),
         Some("rdp") => Some(Protocol::Rdp),
         Some("vnc") => Some(Protocol::Vnc),
+        Some("horizon" | "horizon-client") => Some(Protocol::Horizon),
         Some(other) => return Err(t!("Unbekanntes Protokoll: {other}", "Unknown protocol: {other}")),
     };
     let rest = rest.trim_end_matches('/');
+    let (rest, resource) = match rest.split_once('/') {
+        Some((rest, path)) => (rest, path.trim().to_owned()),
+        None => (rest, String::new()),
+    };
     let (username, host_port) = match rest.rsplit_once('@') {
         Some((user, host)) => (user.to_owned(), host),
         None => (String::new(), rest),
@@ -585,7 +620,9 @@ pub fn parse_quick(input: &str) -> Result<QuickTarget, String> {
     });
     validate_host(host)?;
     validate_username(&username)?;
-    Ok(QuickTarget { protocol, host: host.to_owned(), port: port.unwrap_or(protocol.default_port()), username })
+    // Nur Horizon kennt einen Pfad; bei anderen Protokollen ist er bedeutungslos.
+    let resource = if protocol == Protocol::Horizon { resource } else { String::new() };
+    Ok(QuickTarget { protocol, host: host.to_owned(), port: port.unwrap_or(protocol.default_port()), username, resource })
 }
 
 pub fn parse_color(hex: &str) -> Option<[u8; 3]> {
@@ -618,6 +655,7 @@ pub mod tests {
             icon: None,
             color: None,
             favorite: false,
+            ..Connection::default()
         })
     }
 
@@ -775,6 +813,12 @@ pub mod tests {
         assert_eq!(q("[::1]:2222"), Ok((Protocol::Ssh, "::1".into(), 2222, String::new())));
         assert_eq!(q("fe80::1"), Ok((Protocol::Ssh, "fe80::1".into(), 22, String::new())));
         assert_eq!(q("FIRMA\\admin@dc01:3389"), Ok((Protocol::Rdp, "dc01".into(), 3389, "FIRMA\\admin".into())));
+        let horizon = parse_quick("horizon://fred@view.firma.de/Finance Desktop").unwrap();
+        assert_eq!(
+            (horizon.protocol, horizon.host.as_str(), horizon.port, horizon.username.as_str(), horizon.resource.as_str()),
+            (Protocol::Horizon, "view.firma.de", 443, "fred", "Finance Desktop")
+        );
+        assert_eq!(parse_quick("rdp://server/irgendwas").unwrap().resource, "", "Pfad nur bei Horizon");
         assert!(q("").is_err());
         assert!(q("http://x").is_err());
         assert!(q("host:0").is_err());

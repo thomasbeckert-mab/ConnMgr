@@ -32,6 +32,106 @@ pub fn launch(conn: &Connection, username: &str, password: Option<&str>, ssh_env
         }
         Protocol::Rdp => rdp(conn, password),
         Protocol::Vnc => vnc(conn),
+        Protocol::Horizon => horizon(conn),
+    }
+}
+
+// ---------------------------------------------------------------- Omnissa Horizon
+
+/// Link für den Horizon Client (Omnissa-Doku „Syntax for Creating URIs“):
+/// `horizon-client://[benutzer@]server[:port][/Desktop]?domainName=…&desktopProtocol=…`.
+/// Ein Passwort lässt sich bewusst nicht mitgeben; der Client fragt danach.
+pub fn horizon_uri(conn: &Connection) -> String {
+    let (domain, user) = match conn.username.split_once('\\') {
+        Some((domain, user)) => (Some(domain), user),
+        None => (None, conn.username.as_str()),
+    };
+    // Eine UPN (benutzer@firma.de) versteht der Client im Link nicht; nur der Benutzerteil zählt.
+    let user = user.split('@').next().unwrap_or_default();
+
+    let mut uri = String::from("horizon-client://");
+    if !user.is_empty() {
+        uri.push_str(&percent_encode(user));
+        uri.push('@');
+    }
+    if conn.host.contains(':') {
+        uri.push_str(&format!("[{}]", conn.host));
+    } else {
+        uri.push_str(&conn.host);
+    }
+    if conn.port != Protocol::Horizon.default_port() {
+        uri.push_str(&format!(":{}", conn.port));
+    }
+    if !conn.resource.trim().is_empty() {
+        uri.push('/');
+        uri.push_str(&percent_encode(conn.resource.trim()));
+    }
+    let mut query = Vec::new();
+    if let Some(domain) = domain.filter(|d| !d.is_empty()) {
+        query.push(format!("domainName={}", percent_encode(domain)));
+    }
+    // Das Anzeigeprotokoll gilt nur beim Start eines bestimmten Desktops.
+    if let (Some(protocol), false) = (conn.display_protocol, conn.resource.trim().is_empty()) {
+        query.push(format!("desktopProtocol={}", protocol.label().to_uppercase()));
+    }
+    if !query.is_empty() {
+        uri.push('?');
+        uri.push_str(&query.join("&"));
+    }
+    uri
+}
+
+fn horizon(conn: &Connection) -> Result<Launched> {
+    open_uri(&horizon_uri(conn)).map_err(|e| {
+        anyhow!(t!(
+            "Horizon Client konnte nicht gestartet werden ({e}). Ist der Omnissa Horizon Client installiert?",
+            "Could not start Horizon Client ({e}). Is the Omnissa Horizon Client installed?"
+        ))
+    })?;
+    Ok(Launched { password_consumed: false, info: t!("Horizon Client gestartet", "Horizon Client started") })
+}
+
+/// Öffnet einen Link mit dem dafür registrierten Programm.
+#[cfg(target_os = "macos")]
+fn open_uri(uri: &str) -> io::Result<()> {
+    // `open` meldet ein fehlendes Programm nicht zuverlässig (Exit-Code 0), daher vorher prüfen.
+    if !horizon_client_installed() {
+        return Err(io::Error::other(t!("Horizon Client nicht gefunden", "Horizon Client not found")));
+    }
+    let status = Command::new("open").arg(uri).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(t!("kein Programm für horizon-client:// gefunden", "no application for horizon-client://")))
+    }
+}
+
+/// Sucht „Omnissa Horizon Client.app“ (bzw. den Vorgänger „VMware Horizon Client.app“).
+#[cfg(target_os = "macos")]
+fn horizon_client_installed() -> bool {
+    let mut dirs = vec![std::path::PathBuf::from("/Applications")];
+    if let Some(home) = directories::BaseDirs::new() {
+        dirs.push(home.home_dir().join("Applications"));
+    }
+    dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten().flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        name.ends_with(".app") && name.contains("horizon client")
+    })
+}
+
+/// `cmd /c start` würde am `&` im Link scheitern; der URL-Handler nimmt ihn unverändert.
+#[cfg(target_os = "windows")]
+fn open_uri(uri: &str) -> io::Result<()> {
+    spawn_detached(Command::new("rundll32").arg("url.dll,FileProtocolHandler").arg(uri))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_uri(uri: &str) -> io::Result<()> {
+    let status = Command::new("xdg-open").arg(uri).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(t!("kein Programm für horizon-client:// gefunden", "no application for horizon-client://")))
     }
 }
 
@@ -199,7 +299,6 @@ fn vnc(conn: &Connection) -> Result<Launched> {
     Ok(Launched { password_consumed: false, info: t!("Bildschirmfreigabe geöffnet", "Screen Sharing opened") })
 }
 
-#[cfg(target_os = "macos")]
 fn percent_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -216,6 +315,37 @@ fn vnc(conn: &Connection) -> Result<Launched> {
     spawn_detached(Command::new("vncviewer").arg(format!("{host}::{}", conn.port)))
         .map_err(not_found("vncviewer", ts!("TigerVNC Viewer installieren und in den PATH aufnehmen.", "Install TigerVNC Viewer and add it to PATH.")))?;
     Ok(Launched { password_consumed: false, info: t!("VNC-Viewer gestartet", "VNC viewer started") })
+}
+
+#[cfg(test)]
+mod horizon_tests {
+    use super::*;
+    use crate::model::DisplayProtocol;
+
+    fn conn(username: &str, resource: &str, port: u16, display: Option<DisplayProtocol>) -> Connection {
+        Connection {
+            host: "view.firma.de".into(),
+            port,
+            protocol: Protocol::Horizon,
+            username: username.into(),
+            resource: resource.into(),
+            display_protocol: display,
+            ..Connection::default()
+        }
+    }
+
+    #[test]
+    fn uri_matches_omnisa_syntax() {
+        assert_eq!(horizon_uri(&conn("", "", 443, None)), "horizon-client://view.firma.de");
+        assert_eq!(
+            horizon_uri(&conn("FIRMA\\fred", "Finance Desktop", 443, Some(DisplayProtocol::Blast))),
+            "horizon-client://fred@view.firma.de/Finance%20Desktop?domainName=FIRMA&desktopProtocol=BLAST"
+        );
+        assert_eq!(horizon_uri(&conn("fred@firma.de", "", 8443, None)), "horizon-client://fred@view.firma.de:8443");
+        // Ohne Desktop kein Anzeigeprotokoll (gilt nur für start-session).
+        assert_eq!(horizon_uri(&conn("fred", "", 443, Some(DisplayProtocol::Pcoip))), "horizon-client://fred@view.firma.de");
+        assert_eq!(horizon_uri(&conn("", "App & Co", 443, Some(DisplayProtocol::Pcoip))), "horizon-client://view.firma.de/App%20%26%20Co?desktopProtocol=PCOIP");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

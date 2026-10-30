@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use crate::askpass;
 use crate::crypto::Vault;
 use crate::launcher;
-use crate::model::{self, Connection, Credential, CredentialSource, Folder, Node, Protocol, SecretField, Target};
+use crate::model::{self, Connection, Credential, CredentialSource, DisplayProtocol, Folder, Node, Protocol, SecretField, Target};
 use crate::rdp::{RdpParams, RdpSession, RdpView};
 use crate::sftp::{SftpSessionHandle, SftpView};
 use crate::ssh::{self, Conn, ConnectParams, SshSession};
@@ -195,6 +195,9 @@ enum EditorBody {
         password: Zeroizing<String>,
         show_password: bool,
         favorite: bool,
+        /// Horizon: Desktop/App und Anzeigeprotokoll.
+        resource: String,
+        display_protocol: Option<DisplayProtocol>,
     },
     Credential {
         username: String,
@@ -222,6 +225,8 @@ impl Editor {
                 password: Zeroizing::default(),
                 show_password: false,
                 favorite: false,
+                resource: String::new(),
+                display_protocol: None,
             },
             Kind::Credential => EditorBody::Credential {
                 username: String::new(),
@@ -252,6 +257,8 @@ impl Editor {
                     password: store::decrypt_secret(&s.vault, &c.id, c.password.as_ref())?.unwrap_or_default(),
                     show_password: false,
                     favorite: c.favorite,
+                    resource: c.resource.clone(),
+                    display_protocol: c.display_protocol,
                 },
             ),
             Node::Credential(c) => (
@@ -489,8 +496,16 @@ impl ConnMgrApp {
             icon: None,
             color: None,
             favorite: false,
+            resource: target.resource,
+            display_protocol: None,
         };
-        self.open_adhoc_tab(ctx, conn, None)?;
+        if conn.protocol == Protocol::Horizon {
+            // Horizon läuft im eigenen Client; kein Tab.
+            let launched = launcher::launch(&conn, &conn.username, None, &[])?;
+            self.status = format!("{}: {}", conn.name, launched.info);
+        } else {
+            self.open_adhoc_tab(ctx, conn, None)?;
+        }
         if let State::Unlocked(session) = &mut self.state {
             session.store.settings.remember_quick(input.trim());
             session.store.save(&self.path)?;
@@ -504,6 +519,7 @@ impl ConnMgrApp {
             Protocol::Sftp => TabKind::Sftp,
             Protocol::Rdp => TabKind::Rdp,
             Protocol::Vnc => TabKind::Vnc,
+            Protocol::Horizon => bail!(t!("Horizon läuft im Horizon Client, nicht im Tab", "Horizon runs in the Horizon Client, not in a tab")),
         };
         // Fehlende Angaben (Passwort, bei RDP auch der Benutzer) fragt der Tab ab.
         let credentials = Effective { username: conn.username.clone(), ..Effective::default() };
@@ -861,7 +877,7 @@ impl Session {
                     children,
                 })
             }
-            EditorBody::Connection { host, port, protocol, credentials, username, password, favorite, .. } => {
+            EditorBody::Connection { host, port, protocol, credentials, username, password, favorite, resource, display_protocol, .. } => {
                 let host = host.trim().to_owned();
                 model::validate_host(&host).map_err(|e| anyhow!(e))?;
                 let port: u16 = match port.trim().parse() {
@@ -885,6 +901,8 @@ impl Session {
                     icon,
                     color,
                     favorite: *favorite,
+                    resource: if *protocol == Protocol::Horizon { resource.trim().to_owned() } else { String::new() },
+                    display_protocol: if *protocol == Protocol::Horizon { *display_protocol } else { None },
                 })
             }
             EditorBody::Credential { username, password, private_key, passphrase, .. } => {
@@ -1675,6 +1693,8 @@ impl TreeView<'_> {
                         Protocol::Rdp => {
                             menu_item(ui, ts!("Mit externem RDP-Client öffnen", "Open with external RDP client"), action, || Action::ConnectExternal(id.to_owned()));
                         }
+                        // Horizon startet ohnehin den Horizon Client.
+                        Protocol::Horizon => {}
                     }
                     menu_item(ui, ts!("📋 Passwort kopieren", "📋 Copy password"), action, || Action::CopyPassword(id.to_owned()));
                     let fav = if c.favorite { ts!("☆ Kein Favorit mehr", "☆ Remove favorite") } else { ts!("⭐ Als Favorit", "⭐ Add to favorites") };
@@ -1757,7 +1777,18 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], action: &mut Op
                 ui.weak(ts!("Verbindungen mit „Vom Ordner erben“ verwenden diese Zugangsdaten.", "Connections set to \"Inherit from folder\" use these credentials."));
                 ui.end_row();
             }
-            EditorBody::Connection { host, port, protocol, credentials, username, password, show_password, favorite } => {
+            EditorBody::Connection {
+                host,
+                port,
+                protocol,
+                credentials,
+                username,
+                password,
+                show_password,
+                favorite,
+                resource,
+                display_protocol,
+            } => {
                 ui.label(ts!("Typ", "Type"));
                 let previous = *protocol;
                 egui::ComboBox::from_id_salt("protocol").selected_text(protocol.label()).show_ui(ui, |ui| {
@@ -1771,13 +1802,40 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], action: &mut Op
                 }
                 ui.end_row();
 
-                ui.label(ts!("Host / IP", "Host / IP"));
+                let horizon = *protocol == Protocol::Horizon;
+                ui.label(if horizon { ts!("Connection Server", "Connection Server") } else { ts!("Host / IP", "Host / IP") });
                 ui.add(egui::TextEdit::singleline(host).desired_width(300.0));
                 ui.end_row();
 
                 ui.label("Port");
                 ui.add(egui::TextEdit::singleline(port).desired_width(80.0));
                 ui.end_row();
+
+                if horizon {
+                    ui.label(ts!("Desktop / App", "Desktop / app"));
+                    ui.add(
+                        egui::TextEdit::singleline(resource)
+                            .desired_width(300.0)
+                            .hint_text(ts!("leer = Auswahl im Horizon Client", "empty = choose in Horizon Client")),
+                    );
+                    ui.end_row();
+
+                    ui.label(ts!("Anzeigeprotokoll", "Display protocol"));
+                    let text = display_protocol.map_or(ts!("Standard", "Default"), DisplayProtocol::label);
+                    egui::ComboBox::from_id_salt("display_protocol").selected_text(text).show_ui(ui, |ui| {
+                        ui.selectable_value(display_protocol, None, ts!("Standard", "Default"));
+                        ui.selectable_value(display_protocol, Some(DisplayProtocol::Blast), "Blast");
+                        ui.selectable_value(display_protocol, Some(DisplayProtocol::Pcoip), "PCoIP");
+                    });
+                    ui.end_row();
+
+                    ui.label("");
+                    ui.weak(ts!(
+                        "Startet den Omnissa Horizon Client. Benutzer und Domäne (DOMÄNE\\benutzer) werden vorbelegt, das Passwort liegt 30 s in der Zwischenablage.",
+                        "Starts the Omnissa Horizon Client. User and domain (DOMAIN\\user) are pre-filled; the password is in the clipboard for 30 s."
+                    ));
+                    ui.end_row();
+                }
 
                 ui.label(ts!("Zugangsdaten", "Credentials"));
                 let text = match &*credentials {
@@ -1868,7 +1926,7 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], action: &mut Op
         if protocol == Some(Protocol::Ssh) && ui.button("📂 SFTP").on_hover_text(ts!("Dateibrowser für diesen Server", "File browser for this server")).clicked() {
             *action = Some(Action::OpenSftp(id.clone()));
         }
-        if protocol.is_some()
+        if protocol.is_some_and(|p| p != Protocol::Horizon)
             && ui.button(ts!("Extern", "External")).on_hover_text(ts!("Mit dem Programm des Betriebssystems öffnen", "Open with the operating system's program")).clicked()
         {
             *action = Some(Action::ConnectExternal(id.clone()));
@@ -2308,6 +2366,38 @@ mod tests {
         // Ungültige Eingabe: Fehlermeldung, kein Tab.
         app.handle(&ctx, Action::QuickConnect("http://x".into()));
         assert!(app.status.contains("Unbekanntes Protokoll"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn horizon_editor_fields_and_save() {
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
+        let mut s = session();
+        let mut ed = Editor::new(Kind::Connection, None);
+        ed.name = "VDI".into();
+        if let EditorBody::Connection { host, port, protocol, resource, display_protocol, username, .. } = &mut ed.body {
+            *host = "view.firma.de".into();
+            *protocol = Protocol::Horizon;
+            *port = "443".into();
+            *resource = "Finance Desktop".into();
+            *display_protocol = Some(DisplayProtocol::Blast);
+            *username = "FIRMA\\fred".into();
+        }
+        s.editor = Some(ed);
+        let mut ui = UiDriver::new(dir.join("c.json"));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        assert!(ui.has("Connection Server") && ui.has("Desktop / App") && ui.has("Anzeigeprotokoll"), "Horizon-Felder sichtbar");
+        assert!(!ui.has("Extern"), "kein Extern-Knopf bei Horizon (läuft ohnehin extern)");
+
+        s.apply(Action::Save, &dir.join("c.json")).unwrap();
+        let id = s.selected.clone().unwrap();
+        let conn = model::find_connection(&s.store.items, &id).unwrap();
+        assert_eq!((conn.resource.as_str(), conn.display_protocol), ("Finance Desktop", Some(DisplayProtocol::Blast)));
+        assert_eq!(
+            launcher::horizon_uri(conn),
+            "horizon-client://fred@view.firma.de/Finance%20Desktop?domainName=FIRMA&desktopProtocol=BLAST"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
