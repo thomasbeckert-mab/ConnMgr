@@ -298,6 +298,7 @@ enum Action {
     Reconnect(usize),
     /// SFTP-Browser für eine SSH-Verbindung.
     OpenSftp(String),
+    CloseProperties,
     /// Zusätzliche Sitzung, auch wenn schon ein Tab für die Verbindung offen ist.
     ConnectNew(String),
     ToggleTreePin,
@@ -496,7 +497,7 @@ impl ConMgrApp {
     /// Wechselt zum offenen Tab dieser Verbindung, falls es einen gibt, und markiert sie im Baum.
     fn focus_open_tab(&mut self, id: &str) -> bool {
         let State::Unlocked(session) = &mut self.state else { return false };
-        let _ = session.select(id);
+        session.mark(id);
         let open = session.tabs.iter().position(|t| t.conn_id == id && !matches!(t.conn().status(), ssh::Status::Closed(_)));
         if let Some(index) = open {
             session.active_tab = Some(index);
@@ -599,8 +600,15 @@ impl Session {
                 Ok(None)
             }
             Action::Edit(id) => {
-                self.select(&id)?;
+                self.open_properties(&id)?;
                 self.active_tab = None;
+                Ok(None)
+            }
+            Action::CloseProperties => {
+                self.editor = None;
+                if self.active_tab.is_none() && !self.tabs.is_empty() {
+                    self.active_tab = Some(self.tabs.len() - 1);
+                }
                 Ok(None)
             }
             Action::ActivateTab(index) => {
@@ -619,7 +627,7 @@ impl Session {
                 Ok(None)
             }
             Action::Select(id) => {
-                self.select(&id)?;
+                self.mark(&id);
                 Ok(None)
             }
             Action::Save => self.save(path).map(Some),
@@ -686,10 +694,16 @@ impl Session {
         }
     }
 
-    fn select(&mut self, id: &str) -> Result<()> {
+    /// Lädt den Eintrag in den Eigenschaften-Tab.
+    fn open_properties(&mut self, id: &str) -> Result<()> {
         self.editor = Some(Editor::load(self, id)?);
         self.selected = Some(id.to_owned());
         Ok(())
+    }
+
+    /// Markiert den Eintrag im Baum, ohne die Eigenschaften zu öffnen.
+    fn mark(&mut self, id: &str) {
+        self.selected = Some(id.to_owned());
     }
 
     fn credentials_for(&self, conn: &Connection) -> Result<Effective> {
@@ -802,7 +816,10 @@ impl Session {
             model::clear_credential_references(&mut self.store.items, &cred.id);
         }
         self.store.save(path)?;
-        self.editor = None;
+        // Eigenschaften nur schließen, wenn sie den gelöschten Eintrag (oder etwas darin) zeigen.
+        if self.editor.as_ref().and_then(|ed| ed.id.as_deref()).is_some_and(|eid| model::contains(&removed, eid)) {
+            self.editor = None;
+        }
         self.selected = None;
         Ok(format!("„{}“ gelöscht", removed.name()))
     }
@@ -818,7 +835,7 @@ impl Session {
             self.store.items.push(copy);
         }
         self.store.save(path)?;
-        self.select(&copy_id)?;
+        self.mark(&copy_id);
         Ok(format!("„{name}“ angelegt"))
     }
 
@@ -1041,7 +1058,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         tree_overlay(ctx, s, &mut action);
     }
 
-    if !s.tabs.is_empty() {
+    if !s.tabs.is_empty() || s.editor.is_some() {
         egui::TopBottomPanel::top("tabbar").show(ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| tab_bar(ui, s, &mut action));
@@ -1069,7 +1086,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         }
         let Some(ed) = &mut s.editor else {
             ui.centered_and_justified(|ui| {
-                ui.weak("Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Bearbeiten, Löschen …), Ziehen verschiebt.");
+                ui.weak("Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.");
             });
             return;
         };
@@ -1250,11 +1267,19 @@ fn tree_overlay(ctx: &egui::Context, s: &mut Session, action: &mut Option<Action
 }
 
 fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
-    if ui.selectable_label(s.active_tab.is_none(), "📝 Eigenschaften").clicked() {
-        *action = Some(Action::ActivateTab(None));
+    if let Some(ed) = &s.editor {
+        let name = if ed.name.trim().is_empty() { "Neu".to_owned() } else { ed.name.trim().to_owned() };
+        if ui.selectable_label(s.active_tab.is_none(), format!("📝 Eigenschaften – {name}")).clicked() {
+            *action = Some(Action::ActivateTab(None));
+        }
+        if ui.small_button("✖").on_hover_text("Eigenschaften schließen").clicked() {
+            *action = Some(Action::CloseProperties);
+        }
     }
     for (index, tab) in s.tabs.iter().enumerate() {
-        ui.separator();
+        if index > 0 || s.editor.is_some() {
+            ui.separator();
+        }
         let (dot, dot_color) = match tab.conn().status() {
             ssh::Status::Connected => ("●", Color32::from_rgb(0x23, 0xd1, 0x8b)),
             ssh::Status::Connecting | ssh::Status::HostKey { .. } | ssh::Status::Prompt { .. } => {
@@ -1423,7 +1448,7 @@ impl TreeView<'_> {
             let new_parent = if is_folder { Some(id) } else { parent };
             new_menu_items(ui, new_parent, action);
             ui.separator();
-            menu_item(ui, "✏ Bearbeiten", action, || Action::Edit(id.to_owned()));
+            menu_item(ui, "📝 Eigenschaften", action, || Action::Edit(id.to_owned()));
             menu_item(ui, "Duplizieren", action, || Action::Duplicate(id.to_owned()));
             menu_item(ui, "Exportieren …", action, || Action::OpenDialog(Dialog::export(Some(id.to_owned()))));
             menu_item(ui, "🗑 Löschen", action, || Action::AskDelete(id.to_owned()));
@@ -1845,6 +1870,7 @@ mod tests {
         match action {
             Action::Select(_) => "Select",
             Action::Edit(_) => "Edit",
+            Action::CloseProperties => "CloseProperties",
             Action::Connect(_) => "Connect",
             Action::AskDelete(_) => "AskDelete",
             Action::CloseDialog => "CloseDialog",
@@ -1918,10 +1944,33 @@ mod tests {
     }
 
     #[test]
+    fn properties_only_via_context_menu_and_closable() {
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        ui.click(&mut s, "Production", egui::PointerButton::Primary);
+        ui.frame(&mut s);
+        assert!(s.editor.is_none() && !ui.has("📝 Eigenschaften"), "Klick markiert nur");
+        assert_eq!(s.selected.as_deref(), Some("Production"));
+
+        ui.click(&mut s, "Production", egui::PointerButton::Secondary);
+        ui.frame(&mut s);
+        assert_eq!(ui.click(&mut s, "📝 Eigenschaften", egui::PointerButton::Primary).as_deref(), Some("Edit"));
+        ui.frame(&mut s);
+        assert!(ui.has("📝 Eigenschaften – Production"), "Tab mit Namen");
+        assert!(ui.has("💾 Speichern"), "Editor sichtbar");
+
+        ui.click(&mut s, "✖", egui::PointerButton::Primary);
+        ui.frame(&mut s);
+        assert!(s.editor.is_none() && !ui.has("💾 Speichern"), "geschlossen");
+    }
+
+    #[test]
     fn delete_key_asks_for_selected_entry() {
         let mut s = session();
         let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
-        s.select("Credentials").unwrap();
+        s.mark("Credentials");
         ui.frame(&mut s);
         ui.events.push(egui::Event::Key {
             key: egui::Key::Delete,
@@ -2004,7 +2053,7 @@ mod tests {
         let mut s = session();
         render(&mut s);
         for id in ["Production", "web01", "admin", "lonely"] {
-            s.select(id).unwrap();
+            s.open_properties(id).unwrap();
             s.apply(Action::AskDelete(id.into()), Path::new("unused.json")).unwrap();
             render(&mut s);
             s.dialog = None;
