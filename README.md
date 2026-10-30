@@ -31,7 +31,7 @@ Standardpfad:
 | Linux   | `~/.config/conmgr/connections.json` |
 | Windows | `%APPDATA%\ConMgr\config\connections.json` |
 
-Lesbares JSON – nur die Passwörter sind verschlüsselt. Die Einträge bilden einen Baum aus Ordnern, Verbindungen und Zugangsdaten (Format 2; Dateien im alten Format 1 werden beim Öffnen automatisch übernommen):
+Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüsselt. Die Einträge bilden einen Baum aus Ordnern, Verbindungen und Zugangsdaten (Format 2; Dateien im alten Format 1 werden beim Öffnen automatisch übernommen):
 
 ```json
 {
@@ -55,37 +55,62 @@ Lesbares JSON – nur die Passwörter sind verschlüsselt. Die Einträge bilden 
 ## Bedienung
 
 - **Baum** links: Ordner auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene). **Rechtsklick** öffnet das Kontextmenü, **Doppelklick** verbindet.
-- **Zugangsdaten** sind eigene Einträge. Eine Verbindung nutzt entweder *eigene* Zugangsdaten, *bestimmte* gespeicherte Zugangsdaten oder *erbt* sie vom nächsten übergeordneten Ordner, dem Zugangsdaten zugewiesen sind.
+- **Zugangsdaten** sind eigene Einträge mit Benutzer, Passwort und optional **privatem SSH-Schlüssel samt Passphrase** (aus Datei laden oder einfügen; Fingerabdruck und „Öffentlichen Schlüssel kopieren“). Eine Verbindung nutzt *eigene* Zugangsdaten, *bestimmte* gespeicherte oder *erbt* sie vom nächsten übergeordneten Ordner mit Zugangsdaten.
 - **Icons & Farben** pro Eintrag, **Favoriten** (⭐) mit Filter, **Suche** über Name, Host und Benutzer.
+- **Duplizieren** kopiert Einträge und ganze Ordner; Verweise auf mitkopierte Zugangsdaten zeigen danach auf die Kopien.
+- **Menü ☰:** *Master-Passwort ändern* (neues Salt, alle Geheimnisse umverschlüsselt), *Alles exportieren*, *Importieren*. Einzelne Einträge/Ordner exportiert das Kontextmenü. Exporte sind eigene, mit einem **eigenen Passwort** geschützte Dateien – gut zum Weitergeben. Importe landen in einem neuen Ordner „Import …“.
 - `⌘S` / `Strg+S` speichert den offenen Eintrag.
 
-## SSH in Tabs
+## Sitzungen in Tabs
 
-SSH-Verbindungen öffnen sich per Doppelklick als Tab direkt in ConMgr (eingebautes Terminal, `xterm-256color`). „Extern“ bzw. *In externem Terminal öffnen* startet stattdessen das System-`ssh`.
+Ein Doppelklick öffnet SSH, SFTP und VNC als Tab direkt in ConMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems. RDP läuft weiterhin extern.
 
-- **Anmeldung:** zuerst unverschlüsselte Standardschlüssel aus `~/.ssh` (`id_ed25519`, `id_ecdsa`, `id_rsa`), dann das hinterlegte Passwort, dann Keyboard-Interactive mit dem Passwort.
-- **Host-Keys:** werden gegen `~/.ssh/known_hosts` geprüft (dieselbe Datei wie OpenSSH). Unbekannte Keys zeigt ConMgr mit Fingerabdruck zur Bestätigung an und trägt sie danach ein; **geänderte Keys werden immer abgelehnt**.
-- **Bedienung:** Markieren mit der Maus und `⌘C` kopiert, `⌘V` fügt ein (unter Windows/Linux `Strg+C` ohne Markierung = Abbruch-Signal). Mausrad blättert im Verlauf (5000 Zeilen). Das Terminal passt seine Größe dem Fenster an.
-- Beendete Sitzungen lassen sich im Tab neu verbinden. **Sperren trennt alle Sitzungen.**
+### SSH-Terminal
 
-Noch nicht eingebettet: SSH-Agent, verschlüsselte Schlüssel (Passphrase), SFTP, RDP und VNC – diese laufen weiterhin über die externen Clients.
+Eingebautes Terminal (`xterm-256color`, 256 Farben/Truecolor). Markieren mit der Maus und `⌘C` kopiert, `⌘V` fügt ein (unter Windows/Linux `Strg+C` ohne Markierung = Abbruch-Signal). Mausrad blättert im Verlauf (5000 Zeilen); die Größe folgt dem Fenster.
 
-Ende-zu-Ende-Test gegen einen echten sshd (HOME auf ein Testverzeichnis mit Schlüssel in `.ssh` setzen):
+**Anmeldung** in dieser Reihenfolge:
+1. privater Schlüssel aus den Zugangsdaten,
+2. **SSH-Agent** (`SSH_AUTH_SOCK`; unter Windows OpenSSH-Agent und Pageant),
+3. Standardschlüssel `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`,
+4. Passwort, dann Keyboard-Interactive.
+
+Fehlt eine **Passphrase** oder ein Passwort – oder wird das gespeicherte abgelehnt –, fragt ConMgr im Tab nach. Akzeptiert der Server nur Schlüssel, gibt es eine klare Meldung statt einer Passwortabfrage.
+
+**Host-Keys** werden gegen `~/.ssh/known_hosts` geprüft (dieselbe Datei wie OpenSSH). Unbekannte Keys zeigt ConMgr mit Fingerabdruck zur Bestätigung an; **geänderte Keys werden immer abgelehnt**.
+
+### SFTP-Browser
+
+Für SFTP-Verbindungen per Doppelklick, für SSH-Verbindungen über „📂 SFTP“. Gleiche Anmeldung wie das Terminal. Pfadleiste, Home, Aktualisieren; Doppelklick öffnet Ordner bzw. lädt Dateien herunter. **Hochladen** per Knopf oder **Drag & Drop aus Finder/Explorer**, Übertragungen mit Fortschritt laufen nebenher. Neuer Ordner, Umbenennen, Löschen (Ordner nur, wenn leer).
+
+### VNC
+
+Bild wird ins Fenster eingepasst; Maus (inkl. Rad) und Tastatur werden weitergegeben, `⌘V`/`Strg+V` tippt den Text der Zwischenablage auf der Gegenseite. Text aus der Zwischenablage des Servers wird übernommen. Kodierungen: ZRLE, CopyRect, Raw.
+
+Anmeldung: klassisches **VNC-Passwort** (aus den Zugangsdaten oder per Abfrage). Die macOS-Bildschirmfreigabe verlangt standardmäßig Apple-Anmeldung (ARD), die nicht unterstützt wird – dort *„VNC-Benutzer dürfen den Bildschirm mit Passwort steuern“* aktivieren oder extern öffnen.
+
+Beendete Sitzungen lassen sich im Tab neu verbinden. **Sperren trennt alle Sitzungen.**
+
+### Tests gegen echte Server
+
+Die mit `#[ignore]` markierten Tests laufen gegen einen echten sshd. `HOME` muss auf ein Testverzeichnis zeigen (Schlüssel in `.ssh`, `known_hosts` wird dort angelegt; für den Passphrase-Test zusätzlich `enc_key` mit Passphrase `geheim123`):
 
 ```bash
-CONMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored
+CONMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored --test-threads=1
 ```
+
+Der VNC-Test bringt einen eigenen minimalen RFB-Server mit und läuft bei `cargo test` immer.
 
 ## Verschlüsselung
 
 - Aus dem **Master-Passwort** wird per **Argon2id** (zufälliges Salt) ein 256-Bit-Schlüssel abgeleitet.
-- Jedes Passwort wird mit **AES-256-GCM** und eigener Zufalls-Nonce verschlüsselt; die ID des Eintrags ist Associated Data, verschlüsselte Passwörter lassen sich also nicht zwischen Einträgen vertauschen.
+- Jedes Geheimnis (Passwort, privater Schlüssel, Passphrase) wird einzeln mit **AES-256-GCM** und eigener Zufalls-Nonce verschlüsselt. Associated Data ist die ID des Eintrags plus das Feld – Chiffrate lassen sich weder zwischen Einträgen noch zwischen Feldern vertauschen.
 - `verifier` ist ein verschlüsselter bekannter Text, mit dem das Master-Passwort beim Entsperren geprüft wird.
 - Der Schlüssel liegt nur im Speicher und wird beim Sperren/Beenden genullt. Die Datei wird atomar und (Unix) mit Rechten `0600` geschrieben.
 
 ## Externe Clients
 
-ConMgr startet die Clients des Betriebssystems:
+Über „Extern“ (bei RDP immer) startet ConMgr die Clients des Betriebssystems:
 
 | Typ  | macOS | Linux | Windows |
 |------|-------|-------|---------|

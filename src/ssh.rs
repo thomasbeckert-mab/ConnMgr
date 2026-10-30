@@ -104,7 +104,7 @@ impl Conn {
         trust
     }
 
-    async fn ask(&self, message: String, secret: bool) -> Option<Zeroizing<String>> {
+    pub(crate) async fn ask(&self, message: String, secret: bool) -> Option<Zeroizing<String>> {
         let (reply, answer) = oneshot::channel();
         {
             let mut state = self.state();
@@ -301,7 +301,7 @@ async fn keyboard_interactive(handle: &mut client::Handle<Client>, user: &str, p
 }
 
 /// macOS meldet eine fehlende Berechtigung „Lokales Netzwerk“ als „No route to host“.
-fn connect_error(e: std::io::Error) -> anyhow::Error {
+pub(crate) fn connect_error(e: std::io::Error) -> anyhow::Error {
     const EHOSTUNREACH_MACOS: i32 = 65;
     if cfg!(target_os = "macos") && e.raw_os_error() == Some(EHOSTUNREACH_MACOS) {
         return anyhow!(

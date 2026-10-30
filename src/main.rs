@@ -9,6 +9,7 @@ mod model;
 mod sftp;
 mod ssh;
 mod terminal;
+mod vnc;
 mod store;
 
 use std::path::PathBuf;
