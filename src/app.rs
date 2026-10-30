@@ -994,7 +994,8 @@ fn lock_ui(ctx: &egui::Context, lock: &mut LockScreen, new_file: bool, path: &Pa
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.heading("🔐 ConMgr");
+            ui.add(egui::Image::new(crate::LOGO).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+            ui.heading("ConMgr");
             ui.add_space(8.0);
             ui.label(if new_file { ts!("Neue Verbindungsdatei — Master-Passwort festlegen", "New connection file — set a master password") } else { ts!("Master-Passwort eingeben", "Enter master password") });
             ui.add_space(12.0);
@@ -1127,9 +1128,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
             }
         }
         let Some(ed) = &mut s.editor else {
-            ui.centered_and_justified(|ui| {
-                ui.weak(ts!("Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.", "Click a connection to connect — right-click opens the menu (properties, delete …), drag to move."));
-            });
+            empty_background(ui);
             return;
         };
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1296,6 +1295,22 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
     if !open {
         *action = Some(Action::CloseDialog);
     }
+}
+
+/// Hintergrund, solange keine Sitzung und keine Eigenschaften offen sind: Logo, Name und Hinweis.
+fn empty_background(ui: &mut egui::Ui) {
+    let size = (ui.available_height() * 0.35).clamp(96.0, 220.0);
+    ui.vertical_centered(|ui| {
+        ui.add_space(((ui.available_height() - size - 90.0) / 2.0).max(16.0));
+        ui.add(egui::Image::new(crate::LOGO).fit_to_exact_size(egui::vec2(size, size)));
+        ui.add_space(8.0);
+        ui.heading("ConMgr");
+        ui.add_space(6.0);
+        ui.weak(ts!(
+            "Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.",
+            "Click a connection to connect — right-click opens the menu (properties, delete …), drag to move."
+        ));
+    });
 }
 
 /// Kopfzeile mit Fixieren-Schalter und der Baum selbst.
@@ -1904,6 +1919,7 @@ mod tests {
         fn new(path: PathBuf) -> Self {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
+            egui_extras::install_image_loaders(&ctx);
             crate::i18n::tests::force_english(Some(false));
             Self { ctx, events: Vec::new(), widgets: Vec::new(), path, started: Instant::now() }
         }
@@ -2098,6 +2114,22 @@ mod tests {
         assert!(ui.has("🔒 Lock") && ui.has("Appearance") && ui.has("Click a connection to connect"), "{:?}", ui.widgets.iter().map(|w| &w.0).collect::<Vec<_>>());
         crate::i18n::tests::force_english(Some(false));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn logo_renders_and_background_shows_it() {
+        let image = egui_extras::image::load_svg_bytes_with_size(include_bytes!("../assets/logo.svg"), Some(egui::SizeHint::Size(64, 64)))
+            .expect("Logo rendert");
+        assert_eq!(image.size, [64, 64]);
+        let center = image.pixels[32 * 64 + 32];
+        assert!(center.a() == 255 && center != egui::Color32::WHITE, "Mitte deckend (Terminal), nicht leer");
+
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        for _ in 0..3 {
+            ui.frame(&mut s);
+        }
+        assert!(ui.has("ConMgr") && ui.has("Klick auf eine Verbindung verbindet"), "Hintergrund mit Name und Hinweis");
     }
 
     #[test]

@@ -1,6 +1,8 @@
+<p align="center"><img src="assets/logo.svg" width="128" alt="ConMgr-Logo"></p>
+
 # ConMgr
 
-Plattformübergreifender Verbindungsmanager (macOS, Linux, Windows) für **SSH, SFTP, RDP und VNC**, geschrieben in Rust mit [egui/eframe](https://github.com/emilk/egui).
+Plattformübergreifender Verbindungsmanager (macOS, Linux, Windows) für **SSH, SFTP, RDP und VNC**, geschrieben in Rust mit [egui/eframe](https://github.com/emilk/egui). Oberfläche auf **Deutsch und Englisch**, hell, dunkel oder wie das Betriebssystem.
 
 ## Bauen & Starten
 
@@ -28,6 +30,10 @@ Damit die Freigabe über Neubauten erhalten bleibt, einmalig ein lokales Signatu
 ```
 
 `bundle-macos.sh` signiert dann damit; ohne Zertifikat signiert es ad-hoc, und macOS verwirft die Freigabe bei jedem Neubau.
+
+### Logo
+
+`assets/logo.svg` ist die einzige Quelle: Die App zeigt es auf dem Sperrbildschirm und als Hintergrund, solange keine Sitzung offen ist, und erzeugt daraus das Fenster-Icon. `bundle-macos.sh` rendert es mit `cargo run --example render_icon` in ein Iconset und baut daraus `AppIcon.icns`.
 
 ## Verbindungsdatei
 
@@ -71,6 +77,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 - **Duplizieren** kopiert Einträge und ganze Ordner; Verweise auf mitkopierte Zugangsdaten zeigen danach auf die Kopien.
 - **Menü ☰:** *Master-Passwort ändern* (neues Salt, alle Geheimnisse umverschlüsselt), *Alles exportieren*, *Importieren*. Einzelne Einträge/Ordner exportiert das Kontextmenü. Exporte sind eigene, mit einem **eigenen Passwort** geschützte Dateien – gut zum Weitergeben. Importe landen in einem neuen Ordner „Import …“.
 - `⌘S` / `Strg+S` speichert den offenen Eintrag.
+- **⚙ Einstellungen** (Menü ☰): Sprache (wie System, Deutsch, English) und Darstellung (wie System, Hell, Dunkel). Änderungen wirken sofort und werden in der Verbindungsdatei gespeichert – auch der Sperrbildschirm erscheint danach in Sprache und Design.
 
 ## Sitzungen in Tabs
 

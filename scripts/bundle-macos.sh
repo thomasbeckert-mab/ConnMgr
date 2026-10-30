@@ -10,8 +10,14 @@ cargo build --release
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP=target/release/bundle/ConMgr.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/conmgr "$APP/Contents/MacOS/conmgr"
+
+# App-Icon aus assets/logo.svg
+ICONSET=target/release/bundle/AppIcon.iconset
+rm -rf "$ICONSET"
+cargo run --quiet --release --example render_icon -- "$ICONSET"
+iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$ICONSET"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,16 +28,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>ConMgr</string>
     <key>CFBundleIdentifier</key><string>app.conmgr.ConMgr</string>
     <key>CFBundleExecutable</key><string>conmgr</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>ConMgr verbindet sich per SSH, RDP und VNC mit Rechnern in deinem Netzwerk.</string>
+    <string>ConMgr connects to computers on your network via SSH, SFTP, RDP and VNC.</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array><string>en</string><string>de</string></array>
 </dict>
 </plist>
 PLIST
+
+# Übersetzter Text für die macOS-Rückfrage „Lokales Netzwerk“.
+mkdir -p "$APP/Contents/Resources/en.lproj" "$APP/Contents/Resources/de.lproj"
+echo '"NSLocalNetworkUsageDescription" = "ConMgr connects to computers on your network via SSH, SFTP, RDP and VNC.";' \
+    > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
+echo '"NSLocalNetworkUsageDescription" = "ConMgr verbindet sich per SSH, SFTP, RDP und VNC mit Rechnern in deinem Netzwerk.";' \
+    > "$APP/Contents/Resources/de.lproj/InfoPlist.strings"
 
 # Mit dem lokalen Zertifikat bleibt die Signatur-Anforderung über Neubauten gleich,
 # und macOS behält die Freigabe „Lokales Netzwerk“. Ad-hoc ändert sie bei jedem Bau.
