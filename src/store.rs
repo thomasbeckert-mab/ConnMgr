@@ -23,6 +23,26 @@ pub struct StoreFile {
     pub verifier: Encrypted,
     /// Baum aus Ordnern, Verbindungen und Zugangsdaten.
     pub items: Vec<Node>,
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+/// Oberflächen-Einstellungen, die mit der Datei wandern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    /// `false`: Der Verbindungsbaum blendet sich aus und erscheint beim Darüberfahren am linken Rand.
+    #[serde(default = "default_true")]
+    pub tree_pinned: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { tree_pinned: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Format 1: flache Verbindungsliste ohne Ordner und Zugangsdaten-Objekte.
@@ -43,7 +63,7 @@ impl StoreFile {
         let kdf = KdfParams::new_random();
         let vault = Vault::derive(master, &kdf)?;
         let verifier = vault.encrypt_str(VERIFIER_PLAINTEXT, VERIFIER_AAD)?;
-        let store = Self { version: FORMAT_VERSION, kdf, verifier, items: Vec::new() };
+        let store = Self { version: FORMAT_VERSION, kdf, verifier, items: Vec::new(), settings: Settings::default() };
         Ok((store, vault))
     }
 
@@ -68,6 +88,7 @@ impl StoreFile {
                     kdf: v1.kdf,
                     verifier: v1.verifier,
                     items: v1.connections.into_iter().map(Node::Connection).collect(),
+                    settings: Settings::default(),
                 })
             }
             FORMAT_VERSION => serde_json::from_str(&text).with_context(corrupt),
@@ -178,7 +199,7 @@ impl StoreFile {
         let (fresh, vault) = StoreFile::create(new_master)?;
         let mut items = self.items.clone();
         reencrypt_tree(&mut items, old, &vault)?;
-        *self = StoreFile { items, ..fresh };
+        *self = StoreFile { items, settings: self.settings.clone(), ..fresh };
         Ok(vault)
     }
 

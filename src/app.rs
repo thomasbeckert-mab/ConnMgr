@@ -31,6 +31,8 @@ pub struct ConMgrApp {
     askpass: Option<askpass::Server>,
     /// Führt die eingebetteten SSH-Sitzungen aus; wird beim ersten Bedarf gestartet.
     runtime: Option<tokio::runtime::Runtime>,
+    /// Verbindung (ID, Name), auf die sich die Statuszeile bezieht; endet sie, wird die Zeile geleert.
+    status_conn: Option<(String, String)>,
 }
 
 enum State {
@@ -53,7 +55,9 @@ struct Session {
     favorites_only: bool,
     selected: Option<String>,
     editor: Option<Editor>,
-    confirm_delete: bool,
+    /// Ausgeblendeter Baum gerade eingeblendet (nur wenn nicht fixiert) und wann er wieder verschwindet.
+    tree_overlay: bool,
+    tree_hide_at: Option<Instant>,
     /// Offene SSH-Sitzungen; beim Sperren werden sie mit der Session getrennt.
     tabs: Vec<Tab>,
     /// `None` = Eigenschaften-Tab.
@@ -67,6 +71,7 @@ enum Dialog {
     /// `scope = None` exportiert alles.
     Export { scope: Option<String>, password: Zeroizing<String>, confirm: Zeroizing<String>, error: Option<String> },
     Import { path: PathBuf, password: Zeroizing<String>, error: Option<String> },
+    Delete { id: String, question: String, error: Option<String> },
 }
 
 /// Effektive Zugangsdaten einer Verbindung, entschlüsselt.
@@ -282,7 +287,6 @@ enum Action {
     Select(String),
     Save,
     AskDelete(String),
-    Delete(String),
     Connect(String),
     /// SSH im Terminal des Betriebssystems statt im Tab.
     ConnectExternal(String),
@@ -294,6 +298,9 @@ enum Action {
     Reconnect(usize),
     /// SFTP-Browser für eine SSH-Verbindung.
     OpenSftp(String),
+    /// Zusätzliche Sitzung, auch wenn schon ein Tab für die Verbindung offen ist.
+    ConnectNew(String),
+    ToggleTreePin,
     OpenDialog(Dialog),
     CloseDialog,
     /// Führt den offenen Dialog aus.
@@ -318,6 +325,7 @@ impl ConMgrApp {
             clipboard_secret: None,
             askpass: None,
             runtime: None,
+            status_conn: None,
         }
     }
 
@@ -329,7 +337,8 @@ impl ConMgrApp {
                 self.status = "Gesperrt".into();
                 Ok(())
             }
-            Action::Connect(id) => match self.session().ok().and_then(|s| model::find_connection(&s.store.items, &id)) {
+            Action::Connect(id) if self.focus_open_tab(&id) => Ok(()),
+            Action::Connect(id) | Action::ConnectNew(id) => match self.session().ok().and_then(|s| model::find_connection(&s.store.items, &id)) {
                 Some(c) if c.protocol == Protocol::Ssh => self.open_tab(ctx, &id, TabKind::Terminal, None),
                 Some(c) if c.protocol == Protocol::Sftp => self.open_tab(ctx, &id, TabKind::Sftp, None),
                 Some(c) if c.protocol == Protocol::Vnc => self.open_tab(ctx, &id, TabKind::Vnc, None),
@@ -384,7 +393,8 @@ impl ConMgrApp {
                     favorites_only: false,
                     selected: None,
                     editor: None,
-                    confirm_delete: false,
+                    tree_overlay: false,
+                    tree_hide_at: None,
                     tabs: Vec::new(),
                     active_tab: None,
                     dialog: None,
@@ -468,6 +478,7 @@ impl ConMgrApp {
             content,
         };
         self.status = format!("{}: verbinde …", conn.name);
+        self.status_conn = Some((conn.id.clone(), conn.name.clone()));
         let index = match replace {
             Some(i) if i < session.tabs.len() => {
                 session.tabs[i] = tab;
@@ -480,6 +491,30 @@ impl ConMgrApp {
         };
         session.active_tab = Some(index);
         Ok(())
+    }
+
+    /// Wechselt zum offenen Tab dieser Verbindung, falls es einen gibt, und markiert sie im Baum.
+    fn focus_open_tab(&mut self, id: &str) -> bool {
+        let State::Unlocked(session) = &mut self.state else { return false };
+        let _ = session.select(id);
+        let open = session.tabs.iter().position(|t| t.conn_id == id && !matches!(t.conn().status(), ssh::Status::Closed(_)));
+        if let Some(index) = open {
+            session.active_tab = Some(index);
+        }
+        open.is_some()
+    }
+
+    /// Statuszeile an den Zustand der zuletzt gestarteten Verbindung anpassen.
+    fn refresh_status(&mut self) {
+        let (State::Unlocked(session), Some((id, name))) = (&self.state, &self.status_conn) else { return };
+        let states: Vec<_> = session.tabs.iter().filter(|t| &t.conn_id == id).map(|t| t.conn().status()).collect();
+        if states.iter().any(|s| matches!(s, ssh::Status::Connected)) {
+            self.status = format!("{name}: verbunden");
+        } else if states.iter().all(|s| matches!(s, ssh::Status::Closed(_))) {
+            // Tab geschlossen oder Verbindung beendet: Meldung steht im Tab selbst.
+            self.status.clear();
+            self.status_conn = None;
+        }
     }
 
     fn runtime(&mut self) -> Result<&tokio::runtime::Runtime> {
@@ -560,7 +595,6 @@ impl Session {
             Action::New(kind, parent) => {
                 self.editor = Some(Editor::new(kind, parent));
                 self.selected = None;
-                self.confirm_delete = false;
                 self.active_tab = None;
                 Ok(None)
             }
@@ -590,12 +624,18 @@ impl Session {
             }
             Action::Save => self.save(path).map(Some),
             Action::AskDelete(id) => {
-                self.select(&id)?;
-                self.confirm_delete = true;
-                self.active_tab = None;
+                if model::find(&self.store.items, &id).is_some() {
+                    let question = delete_question(&self.store.items, &id);
+                    self.dialog = Some(Dialog::Delete { id, question, error: None });
+                }
                 Ok(None)
             }
-            Action::Delete(id) => self.delete(&id, path).map(Some),
+            Action::ToggleTreePin => {
+                self.store.settings.tree_pinned = !self.store.settings.tree_pinned;
+                self.tree_overlay = false;
+                self.store.save(path)?;
+                Ok(None)
+            }
             Action::ToggleExpanded(id) => {
                 if let Some(Node::Folder(f)) = model::find_mut(&mut self.store.items, &id) {
                     f.expanded = !f.expanded;
@@ -641,6 +681,7 @@ impl Session {
             | Action::ConnectExternal(_)
             | Action::Reconnect(_)
             | Action::OpenSftp(_)
+            | Action::ConnectNew(_)
             | Action::CopyPassword(_) => Ok(None),
         }
     }
@@ -648,7 +689,6 @@ impl Session {
     fn select(&mut self, id: &str) -> Result<()> {
         self.editor = Some(Editor::load(self, id)?);
         self.selected = Some(id.to_owned());
-        self.confirm_delete = false;
         Ok(())
     }
 
@@ -764,7 +804,6 @@ impl Session {
         self.store.save(path)?;
         self.editor = None;
         self.selected = None;
-        self.confirm_delete = false;
         Ok(format!("„{}“ gelöscht", removed.name()))
     }
 
@@ -824,6 +863,11 @@ impl Session {
                     }
                 }
             }
+            Dialog::Delete { id, .. } => {
+                let id = id.clone();
+                // Offene Tabs dieses Eintrags bleiben verbunden; sie verweisen nur nicht mehr auf den Baum.
+                self.delete(&id, path)
+            }
             Dialog::Import { path: source, password, .. } => StoreFile::import(source, password, &self.vault).and_then(|items| {
                 let name = source.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".conmgr").to_owned()).unwrap_or_default();
                 let count: usize = items.iter().map(model::count).sum();
@@ -848,8 +892,12 @@ impl Session {
                 Ok(Some(message))
             }
             Err(e) => {
-                if let Some(Dialog::ChangeMaster { error, .. } | Dialog::Export { error, .. } | Dialog::Import { error, .. }) =
-                    &mut self.dialog
+                if let Some(
+                    Dialog::ChangeMaster { error, .. }
+                    | Dialog::Export { error, .. }
+                    | Dialog::Import { error, .. }
+                    | Dialog::Delete { error, .. },
+                ) = &mut self.dialog
                 {
                     *error = Some(e.to_string());
                 }
@@ -871,6 +919,7 @@ impl Session {
 impl eframe::App for ConMgrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.expire_clipboard(ctx);
+        self.refresh_status();
         let action = match &mut self.state {
             State::Locked(lock) => lock_ui(ctx, lock, !self.path.exists(), &self.path),
             State::Unlocked(session) => session_ui(ctx, session, &self.status, &self.path),
@@ -978,16 +1027,19 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         });
     });
 
-    egui::SidePanel::left("tree").resizable(true).default_width(300.0).show(ctx, |ui| {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let view = TreeView { filter: s.filter.to_lowercase(), favorites_only: s.favorites_only, selected: s.selected.as_deref() };
-            view.nodes(ui, &s.store.items, None, 0, &mut action);
-            if s.store.items.is_empty() {
-                ui.weak("Noch leer — oben eine Verbindung, einen Ordner oder Zugangsdaten anlegen.");
-            }
-            root_drop_zone(ui, &mut action);
-        });
-    });
+    // Entf (bzw. ⌘⌫ auf dem Mac) löscht den markierten Eintrag, solange kein Eingabefeld oder Tab die Tastatur hat.
+    let delete_key = ctx.input(|i| i.key_pressed(egui::Key::Delete) || (i.modifiers.command && i.key_pressed(egui::Key::Backspace)));
+    if delete_key && !ctx.wants_keyboard_input() && s.dialog.is_none() {
+        if let Some(id) = s.selected.clone() {
+            action = Some(Action::AskDelete(id));
+        }
+    }
+
+    if s.store.settings.tree_pinned {
+        egui::SidePanel::left("tree").resizable(true).default_width(300.0).show(ctx, |ui| tree_ui(ui, s, &mut action));
+    } else {
+        tree_overlay(ctx, s, &mut action);
+    }
 
     if !s.tabs.is_empty() {
         egui::TopBottomPanel::top("tabbar").show(ctx, |ui| {
@@ -1017,12 +1069,12 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         }
         let Some(ed) = &mut s.editor else {
             ui.centered_and_justified(|ui| {
-                ui.weak("Eintrag auswählen — Doppelklick verbindet, Rechtsklick öffnet das Menü, Ziehen verschiebt.");
+                ui.weak("Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Bearbeiten, Löschen …), Ziehen verschiebt.");
             });
             return;
         };
         egui::ScrollArea::vertical().show(ui, |ui| {
-            editor_ui(ui, ed, &s.store.items, &mut s.confirm_delete, &mut action);
+            editor_ui(ui, ed, &s.store.items, &mut action);
         });
     });
 
@@ -1049,6 +1101,7 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
         Dialog::Export { scope: Some(_), .. } => ("Exportieren", "Der Eintrag wird samt Inhalt in eine eigene Datei mit eigenem Passwort geschrieben."),
         Dialog::Export { scope: None, .. } => ("Alles exportieren", "Alle Einträge werden in eine eigene Datei mit eigenem Passwort geschrieben."),
         Dialog::Import { .. } => ("Importieren", "Die Einträge landen in einem neuen Ordner „Import …“."),
+        Dialog::Delete { .. } => ("Eintrag entfernen", ""),
     };
     let mut open = true;
     egui::Window::new(title)
@@ -1057,8 +1110,10 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.label(hint);
-            ui.add_space(8.0);
+            if !hint.is_empty() {
+                ui.label(hint);
+                ui.add_space(8.0);
+            }
             let mut enter = false;
             let mut field = |ui: &mut egui::Ui, label: &str, value: &mut Zeroizing<String>| {
                 ui.label(label);
@@ -1085,7 +1140,16 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
                     field(ui, "Passwort der Datei", password);
                     error.clone()
                 }
+                Dialog::Delete { question, error, .. } => {
+                    ui.label(question.as_str());
+                    ui.end_row();
+                    error.clone()
+                }
             });
+            // Ohne Eingabefeld bestätigt Enter direkt.
+            if matches!(dialog, Dialog::Delete { .. }) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                enter = true;
+            }
             if let Some(error) = error.inner {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
@@ -1095,6 +1159,7 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
                     Dialog::Export { .. } => "Speichern unter …",
                     Dialog::Import { .. } => "Importieren",
                     Dialog::ChangeMaster { .. } => "Ändern",
+                    Dialog::Delete { .. } => "Löschen",
                 };
                 if ui.button(ok).clicked() || enter {
                     *action = Some(Action::SubmitDialog);
@@ -1106,6 +1171,81 @@ fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Actio
         });
     if !open {
         *action = Some(Action::CloseDialog);
+    }
+}
+
+/// Kopfzeile mit Fixieren-Schalter und der Baum selbst.
+fn tree_ui(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
+    ui.horizontal(|ui| {
+        ui.strong("Verbindungen");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let pinned = s.store.settings.tree_pinned;
+            let hint = if pinned { "Automatisch ausblenden" } else { "Fixieren" };
+            if ui.selectable_label(pinned, "📌").on_hover_text(hint).clicked() {
+                *action = Some(Action::ToggleTreePin);
+            }
+        });
+    });
+    ui.separator();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let view = TreeView { filter: s.filter.to_lowercase(), favorites_only: s.favorites_only, selected: s.selected.as_deref() };
+        view.nodes(ui, &s.store.items, None, 0, action);
+        if s.store.items.is_empty() {
+            ui.weak("Noch leer — oben eine Verbindung, einen Ordner oder Zugangsdaten anlegen.");
+        }
+        root_drop_zone(ui, action);
+    });
+}
+
+const TREE_OVERLAY_WIDTH: f32 = 300.0;
+const TREE_HIDE_DELAY: Duration = Duration::from_millis(400);
+
+/// Nicht fixierter Baum: schmale Leiste am linken Rand; beim Darüberfahren schwebt der Baum
+/// über dem Inhalt (die Sitzung behält ihre Größe) und verschwindet wieder, wenn die Maus ihn verlässt.
+fn tree_overlay(ctx: &egui::Context, s: &mut Session, action: &mut Option<Action>) {
+    let strip = egui::SidePanel::left("tree_strip").exact_width(26.0).resizable(false).show(ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            if ui.button("»").on_hover_text("Verbindungen einblenden").clicked() {
+                s.tree_overlay = true;
+            }
+        });
+    });
+    if strip.response.contains_pointer() {
+        s.tree_overlay = true;
+        s.tree_hide_at = None;
+    }
+    if !s.tree_overlay {
+        return;
+    }
+
+    let area_rect = egui::Rect::from_min_size(
+        egui::pos2(strip.response.rect.right(), strip.response.rect.top()),
+        egui::vec2(TREE_OVERLAY_WIDTH, strip.response.rect.height()),
+    );
+    let area = egui::Area::new(egui::Id::new("tree_overlay")).order(egui::Order::Foreground).fixed_pos(area_rect.min).show(ctx, |ui| {
+        egui::Frame::side_top_panel(ui.style()).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
+            ui.set_width(TREE_OVERLAY_WIDTH - 16.0);
+            ui.set_height(area_rect.height() - 16.0);
+            tree_ui(ui, s, action);
+        });
+    });
+
+    // Nach einem Klick auf eine Verbindung den Baum wieder wegräumen.
+    if matches!(action, Some(Action::Connect(_) | Action::ConnectNew(_) | Action::OpenSftp(_))) {
+        s.tree_overlay = false;
+        return;
+    }
+    let busy = ctx.is_context_menu_open() || ctx.dragged_id().is_some() || s.dialog.is_some();
+    if area.response.contains_pointer() || busy {
+        s.tree_hide_at = None;
+    } else {
+        let deadline = *s.tree_hide_at.get_or_insert_with(|| Instant::now() + TREE_HIDE_DELAY);
+        if Instant::now() >= deadline {
+            s.tree_overlay = false;
+            s.tree_hide_at = None;
+        } else {
+            ctx.request_repaint_after(deadline - Instant::now());
+        }
     }
 }
 
@@ -1217,18 +1357,16 @@ impl TreeView<'_> {
             .inner;
 
         let label = match node {
-            Node::Connection(c) => label.on_hover_text(format!("{}  {}", c.protocol.label(), c.host_port())),
+            Node::Connection(c) => label.on_hover_text(format!("{}  {} — Klick verbindet", c.protocol.label(), c.host_port())),
             _ => label,
         };
 
-        if label.double_clicked() {
-            *action = Some(match node {
-                Node::Connection(_) => Action::Connect(id.to_owned()),
-                Node::Folder(_) => Action::ToggleExpanded(id.to_owned()),
-                Node::Credential(_) => Action::Select(id.to_owned()),
-            });
-        } else if label.clicked() {
-            *action = Some(Action::Select(id.to_owned()));
+        // Verbindungen: ein Klick verbindet (bzw. wechselt zum offenen Tab). Bearbeiten über das Kontextmenü.
+        match node {
+            Node::Connection(_) if label.clicked() => *action = Some(Action::Connect(id.to_owned())),
+            Node::Folder(_) if label.double_clicked() => *action = Some(Action::ToggleExpanded(id.to_owned())),
+            Node::Folder(_) | Node::Credential(_) if label.clicked() => *action = Some(Action::Select(id.to_owned())),
+            _ => {}
         }
 
         // Ziehen & Ablegen: auf einen Ordner = hinein, auf einen Eintrag = davor.
@@ -1254,6 +1392,7 @@ impl TreeView<'_> {
             match node {
                 Node::Connection(c) => {
                     menu_item(ui, "▶ Verbinden", action, || Action::Connect(id.to_owned()));
+                    menu_item(ui, "Weitere Sitzung öffnen", action, || Action::ConnectNew(id.to_owned()));
                     match c.protocol {
                         Protocol::Ssh => {
                             menu_item(ui, "📂 SFTP-Browser", action, || Action::OpenSftp(id.to_owned()));
@@ -1308,7 +1447,7 @@ fn menu_item(ui: &mut egui::Ui, label: &str, action: &mut Option<Action>, make: 
 
 // ---------------------------------------------------------------- Editor
 
-fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete: &mut bool, action: &mut Option<Action>) {
+fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], action: &mut Option<Action>) {
     let kind = ed.kind();
     let title = match (kind, ed.id.is_some()) {
         (Kind::Folder, false) => "Neuer Ordner",
@@ -1470,16 +1609,8 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete:
             *action = Some(Action::CopyPassword(id.clone()));
         }
         ui.separator();
-        if *confirm_delete {
-            ui.label(delete_question(items, id));
-            if ui.button("Ja, löschen").clicked() {
-                *action = Some(Action::Delete(id.clone()));
-            }
-            if ui.button("Abbrechen").clicked() {
-                *confirm_delete = false;
-            }
-        } else if ui.button("🗑 Löschen").clicked() {
-            *confirm_delete = true;
+        if ui.button("🗑 Löschen …").clicked() {
+            *action = Some(Action::AskDelete(id.clone()));
         }
     });
     if kind == Kind::Connection && ed.id.is_some() {
@@ -1574,7 +1705,7 @@ fn display_user(user: &str) -> &str {
 }
 
 fn delete_question(items: &[Node], id: &str) -> String {
-    match model::find(items, id) {
+    let question: String = match model::find(items, id) {
         Some(node @ Node::Folder(_)) if model::count(node) > 1 => {
             format!("Ordner mit {} Einträgen löschen?", model::count(node) - 1)
         }
@@ -1583,7 +1714,9 @@ fn delete_question(items: &[Node], id: &str) -> String {
             n => format!("Wird von {n} Einträgen verwendet — trotzdem löschen?"),
         },
         _ => "Wirklich löschen?".into(),
-    }
+    };
+    let name = model::find(items, id).map(Node::name).unwrap_or_default();
+    format!("„{name}“: {question}")
 }
 
 #[cfg(test)]
@@ -1609,7 +1742,8 @@ mod tests {
             favorites_only: false,
             selected: None,
             editor: None,
-            confirm_delete: false,
+            tree_overlay: false,
+            tree_hide_at: None,
             tabs: Vec::new(),
             active_tab: None,
             dialog: None,
@@ -1625,14 +1759,255 @@ mod tests {
         }
     }
 
+    /// Bedient die Oberfläche wie ein Mensch: Elemente per Name (AccessKit) finden und anklicken.
+    struct UiDriver {
+        ctx: egui::Context,
+        events: Vec<egui::Event>,
+        widgets: Vec<(String, egui::Rect)>,
+        path: PathBuf,
+        started: Instant,
+    }
+
+    impl UiDriver {
+        fn new(path: PathBuf) -> Self {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            Self { ctx, events: Vec::new(), widgets: Vec::new(), path, started: Instant::now() }
+        }
+
+        /// Zeichnet ein Bild, wendet die ausgelöste Aktion an und liefert sie zurück (zur Kontrolle).
+        fn frame(&mut self, s: &mut Session) -> Option<String> {
+            let input = egui::RawInput {
+                events: std::mem::take(&mut self.events),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                // Echte Zeit, sonst wertet egui zwei Klicks im Abstand weniger Bilder als Doppelklick.
+                time: Some(self.started.elapsed().as_secs_f64()),
+                ..Default::default()
+            };
+            let mut action = None;
+            let output = self.ctx.run(input, |ctx| action = session_ui(ctx, s, "", &self.path));
+            self.widgets = output
+                .platform_output
+                .accesskit_update
+                .map(|update| {
+                    update
+                        .nodes
+                        .iter()
+                        .filter_map(|(_, node)| {
+                            let b = node.bounds()?;
+                            let rect = egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32));
+                            Some((node.name()?.to_string(), rect))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let action = action?;
+            let name = format!("{:?}", std::mem::discriminant(&action));
+            let label = action_name(&action);
+            let _ = name;
+            s.apply(action, &self.path).unwrap();
+            Some(label)
+        }
+
+        fn has(&self, name: &str) -> bool {
+            self.widgets.iter().any(|(n, _)| n.contains(name))
+        }
+
+        /// Exakter Name bevorzugt, sonst Teiltreffer.
+        fn find(&self, name: &str) -> egui::Pos2 {
+            self.widgets
+                .iter()
+                .find(|(n, _)| n == name)
+                .or_else(|| self.widgets.iter().find(|(n, _)| n.contains(name)))
+                .unwrap_or_else(|| panic!("„{name}“ nicht gefunden in {:?}", self.widgets.iter().map(|w| &w.0).collect::<Vec<_>>()))
+                .1
+                .center()
+        }
+
+        /// Klickt (Drücken und Loslassen in zwei Bildern) und liefert die ausgelöste Aktion.
+        /// Vorher kurz warten, damit egui zwei Klicks nicht als Doppelklick wertet,
+        /// und ein Bild zeichnen, damit neue Fenster ihre endgültige Position haben.
+        fn click(&mut self, s: &mut Session, name: &str, button: egui::PointerButton) -> Option<String> {
+            std::thread::sleep(Duration::from_millis(350));
+            self.frame(s);
+            let pos = self.find(name);
+            let modifiers = egui::Modifiers::NONE;
+            self.events.push(egui::Event::PointerMoved(pos));
+            self.events.push(egui::Event::PointerButton { pos, button, pressed: true, modifiers });
+            let first = self.frame(s);
+            self.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers });
+            let second = self.frame(s);
+            second.or(first)
+        }
+    }
+
+    fn action_name(action: &Action) -> String {
+        match action {
+            Action::Select(_) => "Select",
+            Action::Edit(_) => "Edit",
+            Action::Connect(_) => "Connect",
+            Action::AskDelete(_) => "AskDelete",
+            Action::CloseDialog => "CloseDialog",
+            Action::SubmitDialog => "SubmitDialog",
+            Action::ToggleTreePin => "ToggleTreePin",
+            _ => "andere",
+        }
+        .to_owned()
+    }
+
+    #[test]
+    fn delete_via_tree_context_menu() {
+        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let mut s = session();
+        let mut ui = UiDriver::new(dir.join("c.json"));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        ui.click(&mut s, "lonely", egui::PointerButton::Secondary);
+        ui.frame(&mut s);
+        let action = ui.click(&mut s, "🗑 Löschen", egui::PointerButton::Primary);
+        assert_eq!(action.as_deref(), Some("AskDelete"));
+        ui.frame(&mut s);
+        assert!(ui.has("„lonely“: Wirklich löschen?"), "Dialog zeigt, was gelöscht wird");
+        let action = ui.click(&mut s, "Löschen", egui::PointerButton::Primary);
+        assert_eq!(action.as_deref(), Some("SubmitDialog"));
+        assert!(model::find(&s.store.items, "lonely").is_none(), "Eintrag gelöscht");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delete_via_tree_context_menu_with_open_tab() {
+        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut s = session();
+        let mut ui = UiDriver::new(dir.join("c.json"));
+        let session = SshSession::start(
+            runtime.handle(),
+            ui.ctx.clone(),
+            ConnectParams { host: "127.0.0.1".into(), port: 1, username: "x".into(), password: None, private_key: None, passphrase: None },
+        );
+        s.tabs.push(Tab {
+            conn_id: "web01".into(),
+            title: "web01".into(),
+            tooltip: String::new(),
+            color: None,
+            content: TabContent::Terminal { session, view: TerminalView::default() },
+        });
+        s.active_tab = Some(0);
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        ui.click(&mut s, "lonely", egui::PointerButton::Secondary);
+        ui.frame(&mut s);
+        let action = ui.click(&mut s, "🗑 Löschen", egui::PointerButton::Primary);
+        assert_eq!(action.as_deref(), Some("AskDelete"));
+        ui.frame(&mut s);
+        assert!(ui.has("„lonely“: Wirklich löschen?"), "Dialog zeigt, was gelöscht wird");
+        let action = ui.click(&mut s, "Löschen", egui::PointerButton::Primary);
+        assert_eq!(action.as_deref(), Some("SubmitDialog"));
+        assert!(model::find(&s.store.items, "lonely").is_none(), "Eintrag gelöscht");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn single_click_connects_and_folder_click_selects() {
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        assert_eq!(ui.click(&mut s, "lonely", egui::PointerButton::Primary).as_deref(), Some("Connect"));
+        assert_eq!(ui.click(&mut s, "Production", egui::PointerButton::Primary).as_deref(), Some("Select"));
+    }
+
+    #[test]
+    fn delete_key_asks_for_selected_entry() {
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        s.select("Credentials").unwrap();
+        ui.frame(&mut s);
+        ui.events.push(egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        assert_eq!(ui.frame(&mut s).as_deref(), Some("AskDelete"));
+        ui.frame(&mut s);
+        assert!(ui.has("„Credentials“: Ordner mit 1 Einträgen löschen?"));
+    }
+
+    #[test]
+    fn unpinned_tree_shows_on_hover_and_hides_again() {
+        let mut s = session();
+        s.store.settings.tree_pinned = false;
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        assert!(ui.has("»") && !ui.has("lonely"), "nur die Leiste sichtbar");
+
+        let strip = ui.find("»");
+        ui.events.push(egui::Event::PointerMoved(strip));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        assert!(ui.has("lonely"), "Baum schwebt beim Darüberfahren ein: {:?}", ui.widgets.iter().map(|w| &w.0).collect::<Vec<_>>());
+
+        // Maus weit weg: nach der Verzögerung wieder ausgeblendet.
+        ui.events.push(egui::Event::PointerMoved(egui::pos2(1100.0, 700.0)));
+        ui.frame(&mut s);
+        std::thread::sleep(TREE_HIDE_DELAY + Duration::from_millis(50));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        assert!(!ui.has("lonely"), "Baum wieder ausgeblendet");
+
+        // Fixieren-Schalter im eingeblendeten Baum.
+        ui.events.push(egui::Event::PointerMoved(strip));
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        ui.path = dir.join("c.json");
+        ui.click(&mut s, "📌", egui::PointerButton::Primary);
+        assert!(s.store.settings.tree_pinned);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn status_line_clears_when_connection_ends() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut app = ConMgrApp::new(PathBuf::from("unbenutzt.json"));
+        let mut s = session();
+        let session = SshSession::start(
+            runtime.handle(),
+            egui::Context::default(),
+            ConnectParams { host: "127.0.0.1".into(), port: 1, username: "x".into(), password: None, private_key: None, passphrase: None },
+        );
+        s.tabs.push(Tab {
+            conn_id: "web01".into(),
+            title: "web01".into(),
+            tooltip: String::new(),
+            color: None,
+            content: TabContent::Terminal { session, view: TerminalView::default() },
+        });
+        app.state = State::Unlocked(Box::new(s));
+        app.status = "web01: verbinde …".into();
+        app.status_conn = Some(("web01".into(), "web01".into()));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.status.is_empty() {
+            app.refresh_status();
+            assert!(Instant::now() < deadline, "Statuszeile nicht geleert: {}", app.status);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.status_conn.is_none());
+    }
+
     #[test]
     fn renders_tree_and_all_editors() {
         let mut s = session();
         render(&mut s);
         for id in ["Production", "web01", "admin", "lonely"] {
             s.select(id).unwrap();
-            s.confirm_delete = true;
+            s.apply(Action::AskDelete(id.into()), Path::new("unused.json")).unwrap();
             render(&mut s);
+            s.dialog = None;
         }
         for kind in [Kind::Folder, Kind::Connection, Kind::Credential] {
             s.editor = Some(Editor::new(kind, Some("Production".into())));
@@ -1713,7 +2088,7 @@ mod tests {
         s.apply(Action::Duplicate("admin".into()), &path).unwrap();
         assert_eq!(model::credentials(&s.store.items).len(), 2);
 
-        s.apply(Action::Delete("admin".into()), &path).unwrap();
+        s.delete("admin", &path).unwrap();
         let web01 = model::find_connection(&s.store.items, "web01").unwrap().clone();
         assert_eq!(s.credentials_for(&web01).unwrap().username, "", "Verweis entfernt");
 
