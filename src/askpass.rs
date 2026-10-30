@@ -75,7 +75,7 @@ fn serve(stream: TcpStream, tickets: &Tickets) -> io::Result<()> {
 }
 
 fn fetch(spec: &str) -> io::Result<Option<Zeroizing<String>>> {
-    let (addr, token) = spec.split_once('/').ok_or_else(|| io::Error::other("ungültige Askpass-Angabe"))?;
+    let (addr, token) = spec.split_once('/').ok_or_else(|| io::Error::other(ts!("ungültige Askpass-Angabe", "invalid askpass spec")))?;
     let addr: SocketAddr = addr.parse().map_err(io::Error::other)?;
     let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;

@@ -92,7 +92,7 @@ impl RdpSession {
         runtime.spawn(async move {
             let message = match run(params, &task_conn, &task_fb, rx).await {
                 Ok(message) => message,
-                Err(e) => format!("Fehler: {e:#}"),
+                Err(e) => t!("Fehler: {e:#}", "Error: {e:#}"),
             };
             task_conn.set_status(Status::Closed(message));
         });
@@ -202,7 +202,7 @@ fn clipboard_frame(
     if !cliprdr.is_ready() {
         return Ok(None);
     }
-    let messages = op(cliprdr).map_err(|e| anyhow!("Zwischenablage: {e}"))?;
+    let messages = op(cliprdr).map_err(|e| anyhow!(t!("Zwischenablage: {e}", "Clipboard: {e}")))?;
     Ok(Some(stage.process_svc_processor_messages(messages)?))
 }
 
@@ -216,7 +216,7 @@ struct NoKdc;
 
 impl NetworkClient for NoKdc {
     async fn send(&mut self, _request: &NetworkRequest) -> ConnectorResult<Vec<u8>> {
-        Err(general_err!("Kerberos wird nicht unterstützt"))
+        Err(general_err!("Kerberos is not supported"))
     }
 }
 
@@ -231,18 +231,18 @@ async fn run(
         match input.recv().await {
             Some(Input::Start { width, height, scale_percent }) => break (width, height, scale_percent),
             Some(_) => {}
-            None => return Ok("Verbindung getrennt".into()),
+            None => return Ok(t!("Verbindung getrennt", "Disconnected")),
         }
     };
 
     let target = format!("{}:{}", params.host, params.port);
     let mut username = params.username.clone();
     if username.is_empty() {
-        username = conn.ask(format!("Benutzer für {target}:"), false).await.ok_or_else(|| anyhow!("Anmeldung abgebrochen"))?.to_string();
+        username = conn.ask(t!("Benutzer für {target}:", "User for {target}:"), false).await.ok_or_else(|| anyhow!(t!("Anmeldung abgebrochen", "Login cancelled")))?.to_string();
     }
     let password = match params.password {
         Some(pw) => pw,
-        None => conn.ask(format!("Passwort für {username} auf {target}:"), true).await.ok_or_else(|| anyhow!("Anmeldung abgebrochen"))?,
+        None => conn.ask(t!("Passwort für {username} auf {target}:", "Password for {username} on {target}:"), true).await.ok_or_else(|| anyhow!(t!("Anmeldung abgebrochen", "Login cancelled")))?,
     };
     let (domain, user) = match username.split_once('\\') {
         Some((domain, user)) => (Some(domain.to_owned()), user.to_owned()),
@@ -279,8 +279,8 @@ async fn run(
             pdu = reader.read_pdu() => {
                 let (action, payload) = match pdu {
                     Ok(pdu) => pdu,
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok("Der Server hat die Verbindung beendet".into()),
-                    Err(e) => return Err(e).context("Lesen vom Server"),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(t!("Der Server hat die Verbindung beendet", "The server closed the connection")),
+                    Err(e) => return Err(e).context(t!("Lesen vom Server", "Reading from the server")),
                 };
                 stage.process(&mut image, action, &payload, None)?
             }
@@ -295,14 +295,14 @@ async fn run(
                     requested_size = (width, height, scale_percent);
                     // Ist der Kanal (noch) nicht verfügbar, bleibt die Größe, bis neu verbunden wird.
                     if let Some(Ok(frame)) = stage.encode_resize(width.into(), height.into(), Some(scale_percent), None) {
-                        writer.write_all(&frame).await.context("Senden an den Server")?;
+                        writer.write_all(&frame).await.context(t!("Senden an den Server", "Sending to the server"))?;
                     }
                     Vec::new()
                 }
                 Some(Input::LocalClipboard(text)) => {
                     local_text = Some(text);
                     if let Some(frame) = clipboard_frame(&mut stage, |c| announce_text(c, true))? {
-                        writer.write_all(&frame).await.context("Senden an den Server")?;
+                        writer.write_all(&frame).await.context(t!("Senden an den Server", "Sending to the server"))?;
                     }
                     Vec::new()
                 }
@@ -316,7 +316,7 @@ async fn run(
                             }
                         }
                     }
-                    return Ok("Verbindung getrennt".into());
+                    return Ok(t!("Verbindung getrennt", "Disconnected"));
                 }
             },
         };
@@ -324,9 +324,9 @@ async fn run(
         let mut updated = false;
         for output in outputs {
             match output {
-                ActiveStageOutput::ResponseFrame(frame) => writer.write_all(&frame).await.context("Senden an den Server")?,
+                ActiveStageOutput::ResponseFrame(frame) => writer.write_all(&frame).await.context(t!("Senden an den Server", "Sending to the server"))?,
                 ActiveStageOutput::GraphicsUpdate(_) => updated = true,
-                ActiveStageOutput::Terminate(reason) => return Ok(format!("Sitzung beendet ({reason})")),
+                ActiveStageOutput::Terminate(reason) => return Ok(t!("Sitzung beendet ({reason})", "Session ended ({reason})")),
                 ActiveStageOutput::DeactivateAll => {
                     // Neue Auflösung: Aktivierung mit der angeforderten Größe neu durchlaufen.
                     let mut activation_config = config.clone();
@@ -337,9 +337,9 @@ async fn run(
                     loop {
                         let written = ironrdp_async::single_sequence_step_read(&mut reader, &mut activation, &mut buf)
                             .await
-                            .map_err(|e| anyhow!("Reaktivierung: {e}"))?;
+                            .map_err(|e| anyhow!(t!("Reaktivierung: {e}", "Reactivation: {e}")))?;
                         if let Some(len) = written.size() {
-                            writer.write_all(&buf.filled()[..len]).await.context("Senden an den Server")?;
+                            writer.write_all(&buf.filled()[..len]).await.context(t!("Senden an den Server", "Sending to the server"))?;
                         }
                         if let ConnectionActivationState::Finalized {
                             desktop_size,
@@ -359,7 +359,7 @@ async fn run(
                                 pointer_software_rendering,
                                 static_channel_chunk_size,
                             ) {
-                                bail!("Reaktivierung fehlgeschlagen");
+                                bail!(t!("Reaktivierung fehlgeschlagen", "Reactivation failed"));
                             }
                             publish_size(framebuffer, &image);
                             break;
@@ -389,7 +389,7 @@ async fn run(
                 }
             };
             if let Some(frame) = frame {
-                writer.write_all(&frame).await.context("Senden an den Server")?;
+                writer.write_all(&frame).await.context(t!("Senden an den Server", "Sending to the server"))?;
             }
         }
 
@@ -427,7 +427,7 @@ async fn connect(
     for _ in 0..2 {
         let tcp = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((host, port)))
             .await
-            .map_err(|_| anyhow!("Zeitüberschreitung beim Verbindungsaufbau zu {endpoint}"))?
+            .map_err(|_| anyhow!(t!("Zeitüberschreitung beim Verbindungsaufbau zu {endpoint}", "Timed out connecting to {endpoint}")))?
             .map_err(connect_error)?;
         tcp.set_nodelay(true)?;
         let client_addr: SocketAddr = tcp.local_addr()?;
@@ -457,16 +457,18 @@ async fn connect(
             Ok(upgraded) => upgraded,
             Err(e) => {
                 let Some((fingerprint, reason)) = rejected.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-                    return Err(anyhow!("TLS-Verbindung fehlgeschlagen: {e}"));
+                    return Err(anyhow!(t!("TLS-Verbindung fehlgeschlagen: {e}", "TLS connection failed: {e}")));
                 };
                 if known.contains_key(&endpoint) {
-                    bail!(
+                    bail!(t!(
                         "WARNUNG: Das TLS-Zertifikat von {endpoint} hat sich geändert (jetzt {fingerprint}). \
-                         Möglicherweise wird die Verbindung abgehört — abgebrochen."
-                    );
+                         Möglicherweise wird die Verbindung abgehört — abgebrochen.",
+                        "WARNING: The TLS certificate of {endpoint} has changed (now {fingerprint}). \
+                         Someone may be eavesdropping — aborted."
+                    ));
                 }
-                if !conn.ask_host_key(fingerprint.clone(), format!("TLS-Zertifikat (SHA-256) — {reason}")).await {
-                    bail!("Zertifikat nicht bestätigt — Verbindung abgebrochen");
+                if !conn.ask_host_key(fingerprint.clone(), t!("TLS-Zertifikat (SHA-256) — {reason}", "TLS certificate (SHA-256) — {reason}")).await {
+                    bail!(t!("Zertifikat nicht bestätigt — Verbindung abgebrochen", "Certificate not confirmed — connection aborted"));
                 }
                 remember_certificate(&endpoint, &fingerprint)?;
                 continue;
@@ -474,7 +476,7 @@ async fn connect(
         };
 
         let server_public_key = ironrdp_tls::extract_tls_server_public_key(&certificate)
-            .ok_or_else(|| anyhow!("Öffentlicher Schlüssel im Zertifikat fehlt"))?
+            .ok_or_else(|| anyhow!(t!("Öffentlicher Schlüssel im Zertifikat fehlt", "Certificate has no public key")))?
             .to_vec();
         let upgraded = ironrdp_async::mark_as_upgraded(should_upgrade, &mut connector);
         let mut framed = ironrdp_tokio::TokioFramed::new(tls);
@@ -492,13 +494,13 @@ async fn connect(
         let result = outcome.into_connected().map_err(|e| anyhow!("{e}"))?;
         return Ok((result, framed));
     }
-    bail!("Zertifikat konnte nicht bestätigt werden")
+    bail!(t!("Zertifikat konnte nicht bestätigt werden", "Certificate could not be confirmed"))
 }
 
 fn login_error(e: ironrdp_connector::ConnectorError) -> anyhow::Error {
     let text = format!("{e:#}");
     if text.contains("LOGON_FAILURE") || text.contains("0x8009030C") || text.to_lowercase().contains("logon") {
-        anyhow!("Anmeldung fehlgeschlagen: Benutzer oder Passwort falsch ({text})")
+        anyhow!(t!("Anmeldung fehlgeschlagen: Benutzer oder Passwort falsch ({text})", "Login failed: wrong user or password ({text})"))
     } else {
         anyhow!("{text}")
     }
@@ -594,7 +596,7 @@ fn remember_certificate(endpoint: &str, fingerprint: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&known)?).context("Zertifikat konnte nicht gespeichert werden")
+    std::fs::write(&path, serde_json::to_string_pretty(&known)?).context(t!("Zertifikat konnte nicht gespeichert werden", "Could not save certificate"))
 }
 
 // ---------------------------------------------------------------- Oberfläche

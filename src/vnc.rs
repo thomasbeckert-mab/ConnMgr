@@ -90,7 +90,7 @@ impl VncSession {
         runtime.spawn(async move {
             let message = match run(params, &task_conn, &task_fb, rx).await {
                 Ok(message) => message,
-                Err(e) => format!("Fehler: {e:#}"),
+                Err(e) => t!("Fehler: {e:#}", "Error: {e:#}"),
             };
             task_conn.set_status(Status::Closed(message));
         });
@@ -133,7 +133,7 @@ async fn run(
 ) -> Result<String> {
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((params.host.as_str(), params.port)))
         .await
-        .map_err(|_| anyhow!("Zeitüberschreitung beim Verbindungsaufbau zu {}:{}", params.host, params.port))?
+        .map_err(|_| anyhow!(t!("Zeitüberschreitung beim Verbindungsaufbau zu {}:{}", "Timed out connecting to {}:{}", params.host, params.port)))?
         .map_err(connect_error)?;
     tcp.set_nodelay(true)?;
 
@@ -143,7 +143,7 @@ async fn run(
         match password {
             Some(pw) => Ok(pw.to_string()),
             None => auth_conn
-                .ask(format!("VNC-Passwort für {target}:"), true)
+                .ask(t!("VNC-Passwort für {target}:", "VNC password for {target}:"), true)
                 .await
                 .map(|pw| pw.to_string())
                 .ok_or(VncError::NoPassword),
@@ -191,7 +191,7 @@ async fn run(
             }
             event = input.recv() => match event {
                 Some(event) => client.input(event).await.map_err(vnc_error)?,
-                None => break Ok("Verbindung getrennt".to_owned()),
+                None => break Ok(t!("Verbindung getrennt", "Disconnected")),
             },
             _ = refresh.tick() => client.input(X11Event::Refresh).await.map_err(vnc_error)?,
         }
@@ -202,13 +202,15 @@ async fn run(
 
 fn vnc_error(e: VncError) -> anyhow::Error {
     match e {
-        VncError::WrongPassword => anyhow!("Falsches VNC-Passwort"),
-        VncError::NoPassword => anyhow!("Anmeldung abgebrochen"),
-        VncError::InvalidSecurityTyep(t) => anyhow!(
-            "Der Server verlangt eine nicht unterstützte Anmeldung (Typ {t}). Bei der macOS-Bildschirmfreigabe \
-             „VNC-Benutzer dürfen den Bildschirm mit Passwort steuern“ aktivieren."
-        ),
-        VncError::IoError(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => anyhow!("Der Server hat die Verbindung beendet"),
+        VncError::WrongPassword => anyhow!(t!("Falsches VNC-Passwort", "Wrong VNC password")),
+        VncError::NoPassword => anyhow!(t!("Anmeldung abgebrochen", "Login cancelled")),
+        VncError::InvalidSecurityTyep(kind) => anyhow!(t!(
+            "Der Server verlangt eine nicht unterstützte Anmeldung (Typ {kind}). Bei der macOS-Bildschirmfreigabe \
+             „VNC-Benutzer dürfen den Bildschirm mit Passwort steuern“ aktivieren.",
+            "The server requires an unsupported login (type {kind}). For macOS Screen Sharing, \
+             enable \"VNC viewers may control screen with password\"."
+        )),
+        VncError::IoError(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => anyhow!(t!("Der Server hat die Verbindung beendet", "The server closed the connection")),
         other => anyhow!("{other}"),
     }
 }

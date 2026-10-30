@@ -48,7 +48,7 @@ pub struct Vault {
 impl Vault {
     pub fn derive(master: &str, kdf: &KdfParams) -> Result<Self> {
         if kdf.algorithm != "argon2id" {
-            bail!("Unbekannter KDF-Algorithmus: {}", kdf.algorithm);
+            bail!(t!("Unbekannter KDF-Algorithmus: {}", "Unknown KDF algorithm: {}", kdf.algorithm));
         }
         let salt = B64.decode(&kdf.salt)?;
         let params = Params::new(kdf.m_cost, kdf.t_cost, kdf.p_cost, Some(32)).map_err(|e| anyhow!("{e}"))?;
@@ -69,20 +69,20 @@ impl Vault {
         let data = self
             .cipher()
             .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad })
-            .map_err(|_| anyhow!("Verschlüsselung fehlgeschlagen"))?;
+            .map_err(|_| anyhow!(t!("Verschlüsselung fehlgeschlagen", "Encryption failed")))?;
         Ok(Encrypted { nonce: B64.encode(nonce), data: B64.encode(data) })
     }
 
     pub fn decrypt(&self, enc: &Encrypted, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let nonce = B64.decode(&enc.nonce)?;
         if nonce.len() != 12 {
-            bail!("Ungültige Nonce-Länge");
+            bail!(t!("Ungültige Nonce-Länge", "Invalid nonce length"));
         }
         let data = B64.decode(&enc.data)?;
         let plaintext = self
             .cipher()
             .decrypt(Nonce::from_slice(&nonce), Payload { msg: &data, aad })
-            .map_err(|_| anyhow!("Entschlüsselung fehlgeschlagen (falscher Schlüssel oder beschädigte Daten)"))?;
+            .map_err(|_| anyhow!(t!("Entschlüsselung fehlgeschlagen (falscher Schlüssel oder beschädigte Daten)", "Decryption failed (wrong key or corrupt data)")))?;
         Ok(Zeroizing::new(plaintext))
     }
 
@@ -92,7 +92,7 @@ impl Vault {
 
     pub fn decrypt_str(&self, enc: &Encrypted, aad: &str) -> Result<Zeroizing<String>> {
         let bytes = self.decrypt(enc, aad.as_bytes())?;
-        let s = std::str::from_utf8(&bytes).map_err(|_| anyhow!("Passwort ist kein gültiges UTF-8"))?;
+        let s = std::str::from_utf8(&bytes).map_err(|_| anyhow!(t!("Passwort ist kein gültiges UTF-8", "Password is not valid UTF-8")))?;
         Ok(Zeroizing::new(s.to_owned()))
     }
 }

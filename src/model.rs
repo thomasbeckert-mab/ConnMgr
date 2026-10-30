@@ -385,16 +385,16 @@ fn insert_next_to(nodes: &mut Vec<Node>, sibling: &str, offset: usize, node: Nod
 
 /// Verschiebt einen Eintrag; ein Ordner kann nicht in sich selbst verschoben werden.
 pub fn move_node(nodes: &mut Vec<Node>, id: &str, target: &Target) -> Result<(), String> {
-    let moving = find(nodes, id).ok_or("Eintrag nicht gefunden")?;
+    let moving = find(nodes, id).ok_or_else(|| t!("Eintrag nicht gefunden", "Entry not found"))?;
     if let Target::Into(t) | Target::Before(t) | Target::After(t) = target {
         if contains(moving, t) {
-            return Err("Ein Ordner kann nicht in sich selbst verschoben werden".into());
+            return Err(t!("Ein Ordner kann nicht in sich selbst verschoben werden", "A folder cannot be moved into itself"));
         }
     }
-    let node = remove(nodes, id).ok_or("Eintrag nicht gefunden")?;
+    let node = remove(nodes, id).ok_or_else(|| t!("Eintrag nicht gefunden", "Entry not found"))?;
     if let Err(node) = insert(nodes, target, node) {
         nodes.push(node);
-        return Err("Ziel nicht gefunden, Eintrag auf oberste Ebene verschoben".into());
+        return Err(t!("Ziel nicht gefunden, Eintrag auf oberste Ebene verschoben", "Target not found, entry moved to the top level"));
     }
     Ok(())
 }
@@ -504,7 +504,7 @@ pub fn resolve<'a>(nodes: &'a [Node], conn: &'a Connection) -> Result<Option<Res
         }
         CredentialSource::Stored { id } => find_credential(nodes, id)
             .map(|c| Some(from_credential(c)))
-            .ok_or_else(|| format!("Zugangsdaten für „{}“ nicht gefunden", conn.name)),
+            .ok_or_else(|| t!("Zugangsdaten für „{}“ nicht gefunden", "Credentials for \"{}\" not found", conn.name)),
         CredentialSource::Inherit => {
             let parent = parent_id(nodes, &conn.id);
             Ok(inherited_credential(nodes, parent.as_deref()).map(from_credential))
@@ -517,10 +517,10 @@ pub fn resolve<'a>(nodes: &'a [Node], conn: &'a Connection) -> Result<Option<Res
 /// Verhindert, dass Host oder Benutzer als Kommandozeilenoption interpretiert werden.
 pub fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
-        return Err("Host/IP darf nicht leer sein".into());
+        return Err(t!("Host/IP darf nicht leer sein", "Host/IP must not be empty"));
     }
     if host.starts_with('-') || !host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:%".contains(c)) {
-        return Err(format!("Ungültiger Host: {host}"));
+        return Err(t!("Ungültiger Host: {host}", "Invalid host: {host}"));
     }
     Ok(())
 }
@@ -528,7 +528,7 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 pub fn validate_username(user: &str) -> Result<(), String> {
     // `@` ist erlaubt (UPN wie benutzer@firma.de); ssh trennt Benutzer und Host am letzten `@`.
     if user.starts_with('-') || user.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("Ungültiger Benutzername: {user}"));
+        return Err(t!("Ungültiger Benutzername: {user}", "Invalid user name: {user}"));
     }
     Ok(())
 }

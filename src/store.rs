@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::{Encrypted, KdfParams, Vault};
+use crate::i18n::Language;
 use crate::model::{Connection, CredentialSource, Node, SecretField};
 
 const FORMAT_VERSION: u32 = 2;
@@ -27,17 +28,53 @@ pub struct StoreFile {
     pub settings: Settings,
 }
 
-/// Oberflächen-Einstellungen, die mit der Datei wandern.
+/// Oberflächen-Einstellungen, die mit der Datei wandern (unverschlüsselt, schon vor dem Entsperren lesbar).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// `false`: Der Verbindungsbaum blendet sich aus und erscheint beim Darüberfahren am linken Rand.
     #[serde(default = "default_true")]
     pub tree_pinned: bool,
+    /// `None` = Sprache des Betriebssystems.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { tree_pinned: true }
+        Self { tree_pinned: true, language: None, theme: Theme::System }
+    }
+}
+
+impl Settings {
+    pub fn effective_language(&self) -> Language {
+        self.language.unwrap_or_else(Language::system)
+    }
+
+    /// Liest nur die Einstellungen aus einer (noch gesperrten) Verbindungsdatei.
+    pub fn read(path: &Path) -> Option<Self> {
+        StoreFile::load(path).ok().map(|store| store.settings)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Hell oder dunkel wie das Betriebssystem.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn preference(self) -> eframe::egui::ThemePreference {
+        match self {
+            Theme::System => eframe::egui::ThemePreference::System,
+            Theme::Light => eframe::egui::ThemePreference::Light,
+            Theme::Dark => eframe::egui::ThemePreference::Dark,
+        }
     }
 }
 
@@ -71,14 +108,14 @@ impl StoreFile {
         let vault = Vault::derive(master, &self.kdf)?;
         match vault.decrypt_str(&self.verifier, VERIFIER_AAD) {
             Ok(pt) if pt.as_str() == VERIFIER_PLAINTEXT => Ok(vault),
-            _ => Err(anyhow!("Falsches Master-Passwort")),
+            _ => Err(anyhow!(t!("Falsches Master-Passwort", "Wrong master password"))),
         }
     }
 
     /// Lädt die Datei; Format 1 wird beim Laden in Format 2 überführt.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = fs::read_to_string(path).with_context(|| format!("{} kann nicht gelesen werden", path.display()))?;
-        let corrupt = || format!("{} ist beschädigt", path.display());
+        let text = fs::read_to_string(path).with_context(|| t!("{} kann nicht gelesen werden", "Cannot read {}", path.display()))?;
+        let corrupt = || t!("{} ist beschädigt", "{} is corrupt", path.display());
         let VersionOnly { version } = serde_json::from_str(&text).with_context(corrupt)?;
         match version {
             1 => {
@@ -92,7 +129,7 @@ impl StoreFile {
                 })
             }
             FORMAT_VERSION => serde_json::from_str(&text).with_context(corrupt),
-            other => bail!("Nicht unterstützte Dateiversion {other}"),
+            other => bail!(t!("Nicht unterstützte Dateiversion {other}", "Unsupported file version {other}")),
         }
     }
 
@@ -214,7 +251,7 @@ impl StoreFile {
     /// mit neuen IDs und für `vault` umverschlüsselt.
     pub fn import(path: &Path, password: &str, vault: &Vault) -> Result<Vec<Node>> {
         let file = StoreFile::load(path)?;
-        let file_vault = file.unlock(password).map_err(|_| anyhow!("Falsches Passwort für {}", path.display()))?;
+        let file_vault = file.unlock(password).map_err(|_| anyhow!(t!("Falsches Passwort für {}", "Wrong password for {}", path.display())))?;
         file.items.iter().map(|n| copy_subtree(n, &file_vault, vault)).collect()
     }
 }

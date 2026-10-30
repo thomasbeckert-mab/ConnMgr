@@ -24,11 +24,11 @@ pub fn launch(conn: &Connection, username: &str, password: Option<&str>, ssh_env
     match conn.protocol {
         Protocol::Ssh => {
             open_terminal("ssh", &["-p".into(), conn.port.to_string(), ssh_target(conn)], ssh_env)?;
-            Ok(Launched { password_consumed: !ssh_env.is_empty(), info: "SSH-Sitzung im Terminal gestartet".into() })
+            Ok(Launched { password_consumed: !ssh_env.is_empty(), info: t!("SSH-Sitzung im Terminal gestartet", "SSH session started in terminal") })
         }
         Protocol::Sftp => {
             open_terminal("sftp", &["-P".into(), conn.port.to_string(), ssh_target(conn)], ssh_env)?;
-            Ok(Launched { password_consumed: !ssh_env.is_empty(), info: "SFTP-Sitzung im Terminal gestartet".into() })
+            Ok(Launched { password_consumed: !ssh_env.is_empty(), info: t!("SFTP-Sitzung im Terminal gestartet", "SFTP session started in terminal") })
         }
         Protocol::Rdp => rdp(conn, password),
         Protocol::Vnc => vnc(conn),
@@ -56,9 +56,9 @@ fn not_found<'a>(program: &'a str, hint: &str) -> impl FnOnce(io::Error) -> anyh
     let hint = hint.to_owned();
     move |e| {
         if e.kind() == io::ErrorKind::NotFound {
-            anyhow!("{program} nicht gefunden. {hint}")
+            anyhow!(t!("{program} nicht gefunden. {hint}", "{program} not found. {hint}"))
         } else {
-            anyhow!("{program} konnte nicht gestartet werden: {e}")
+            anyhow!(t!("{program} konnte nicht gestartet werden: {e}", "Could not start {program}: {e}"))
         }
     }
 }
@@ -96,7 +96,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 fn open_terminal(program: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
     use std::os::windows::process::CommandExt;
     spawn_detached(Command::new(program).args(args).envs(env.iter().map(|(k, v)| (k, v))).creation_flags(CREATE_NEW_CONSOLE))
-        .map_err(not_found(program, "OpenSSH-Client unter Einstellungen → Optionale Features installieren."))
+        .map_err(not_found(program, ts!("OpenSSH-Client unter Einstellungen → Optionale Features installieren.", "Install the OpenSSH client under Settings → Optional features.")))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -122,10 +122,10 @@ fn open_terminal(program: &str, args: &[String], env: &[(String, String)]) -> Re
         match spawn_detached(Command::new(term).args(*prefix).arg(program).args(&args)) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(anyhow!("{term} konnte nicht gestartet werden: {e}")),
+            Err(e) => return Err(anyhow!(t!("{term} konnte nicht gestartet werden: {e}", "Could not start {term}: {e}"))),
         }
     }
-    Err(anyhow!("Kein Terminal-Emulator gefunden"))
+    Err(anyhow!(t!("Kein Terminal-Emulator gefunden", "No terminal emulator found")))
 }
 
 // ---------------------------------------------------------------- RDP
@@ -145,7 +145,7 @@ fn rdp(conn: &Connection, password: Option<&str>) -> Result<Launched> {
         consumed = status.success();
     }
     spawn_detached(Command::new("mstsc").arg(format!("/v:{}", conn.host_port()))).map_err(not_found("mstsc", ""))?;
-    Ok(Launched { password_consumed: consumed, info: "Remotedesktopverbindung gestartet".into() })
+    Ok(Launched { password_consumed: consumed, info: t!("Remotedesktopverbindung gestartet", "Remote Desktop Connection started") })
 }
 
 #[cfg(target_os = "macos")]
@@ -161,7 +161,7 @@ fn rdp(conn: &Connection, _password: Option<&str>) -> Result<Launched> {
     spawn_detached(Command::new("open").arg(&path)).map_err(not_found("open", ""))?;
     Ok(Launched {
         password_consumed: false,
-        info: "RDP-Datei geöffnet (benötigt die Microsoft \"Windows App\")".into(),
+        info: t!("RDP-Datei geöffnet (benötigt die Microsoft \"Windows App\")", "RDP file opened (requires the Microsoft \"Windows App\")"),
     })
 }
 
@@ -179,13 +179,13 @@ fn rdp(conn: &Connection, password: Option<&str>) -> Result<Launched> {
         }
         match spawn_detached(&mut cmd) {
             Ok(()) => {
-                return Ok(Launched { password_consumed: password.is_some(), info: format!("{bin} gestartet") });
+                return Ok(Launched { password_consumed: password.is_some(), info: t!("{bin} gestartet", "{bin} started") });
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(anyhow!("{bin} konnte nicht gestartet werden: {e}")),
+            Err(e) => return Err(anyhow!(t!("{bin} konnte nicht gestartet werden: {e}", "Could not start {bin}: {e}"))),
         }
     }
-    Err(anyhow!("FreeRDP nicht gefunden. Paket freerdp3-x11 oder freerdp2-x11 installieren."))
+    Err(anyhow!(t!("FreeRDP nicht gefunden. Paket freerdp3-x11 oder freerdp2-x11 installieren.", "FreeRDP not found. Install the freerdp3-x11 or freerdp2-x11 package.")))
 }
 
 // ---------------------------------------------------------------- VNC
@@ -196,7 +196,7 @@ fn vnc(conn: &Connection) -> Result<Launched> {
     let user = if conn.username.is_empty() { String::new() } else { format!("{}@", percent_encode(&conn.username)) };
     let url = format!("vnc://{user}{}", conn.host_port());
     spawn_detached(Command::new("open").arg(url)).map_err(not_found("open", ""))?;
-    Ok(Launched { password_consumed: false, info: "Bildschirmfreigabe geöffnet".into() })
+    Ok(Launched { password_consumed: false, info: t!("Bildschirmfreigabe geöffnet", "Screen Sharing opened") })
 }
 
 #[cfg(target_os = "macos")]
@@ -214,8 +214,8 @@ fn vnc(conn: &Connection) -> Result<Launched> {
     // TigerVNC/TightVNC/RealVNC: "host::port" bezeichnet einen TCP-Port statt einer Display-Nummer.
     let host = if conn.host.contains(':') { format!("[{}]", conn.host) } else { conn.host.clone() };
     spawn_detached(Command::new("vncviewer").arg(format!("{host}::{}", conn.port)))
-        .map_err(not_found("vncviewer", "TigerVNC Viewer installieren und in den PATH aufnehmen."))?;
-    Ok(Launched { password_consumed: false, info: "VNC-Viewer gestartet".into() })
+        .map_err(not_found("vncviewer", ts!("TigerVNC Viewer installieren und in den PATH aufnehmen.", "Install TigerVNC Viewer and add it to PATH.")))?;
+    Ok(Launched { password_consumed: false, info: t!("VNC-Viewer gestartet", "VNC viewer started") })
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -27,23 +27,25 @@ impl ConnOverlay {
             Status::Connecting => centered_frame(ui, rect, Vec2::new(160.0, 40.0), |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Verbinde …");
+                    ui.label(ts!("Verbinde …", "Connecting …"));
                 });
             }),
             Status::HostKey { fingerprint, algorithm } => centered_frame(ui, rect, Vec2::new(560.0, 190.0), |ui| {
-                ui.heading("Unbekannter Server");
-                ui.label(
+                ui.heading(ts!("Unbekannter Server", "Unknown server"));
+                ui.label(ts!(
                     "Die Identität dieses Servers ist noch nicht als vertrauenswürdig gespeichert. \
                      Vergleiche den Fingerabdruck mit dem des Servers, bevor du vertraust.",
-                );
+                    "This server's identity has not been trusted yet. \
+                     Compare the fingerprint with the server's before you trust it.",
+                ));
                 ui.add_space(6.0);
                 ui.monospace(format!("{algorithm}\n{fingerprint}"));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Vertrauen & verbinden").clicked() {
+                    if ui.button(ts!("Vertrauen & verbinden", "Trust & connect")).clicked() {
                         conn.answer_host_key(true);
                     }
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button(ts!("Abbrechen", "Cancel")).clicked() {
                         conn.answer_host_key(false);
                         out.close = true;
                     }
@@ -64,7 +66,7 @@ impl ConnOverlay {
                         conn.answer_prompt(Some(std::mem::take(&mut self.input)));
                         self.focused = false;
                     }
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button(ts!("Abbrechen", "Cancel")).clicked() {
                         conn.answer_prompt(None);
                         self.input.clear();
                         self.focused = false;
@@ -77,10 +79,10 @@ impl ConnOverlay {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(message);
-                            if ui.button("🔄 Neu verbinden").clicked() {
+                            if ui.button(ts!("🔄 Neu verbinden", "🔄 Reconnect")).clicked() {
                                 out.reconnect = true;
                             }
-                            if ui.button("Tab schließen").clicked() {
+                            if ui.button(ts!("Tab schließen", "Close tab")).clicked() {
                                 out.close = true;
                             }
                         });

@@ -137,7 +137,7 @@ pub async fn establish(params: &ConnectParams, conn: &Arc<Conn>) -> Result<clien
     });
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((params.host.as_str(), params.port)))
         .await
-        .map_err(|_| anyhow!("Zeitüberschreitung beim Verbindungsaufbau zu {}:{}", params.host, params.port))?
+        .map_err(|_| anyhow!(t!("Zeitüberschreitung beim Verbindungsaufbau zu {}:{}", "Timed out connecting to {}:{}", params.host, params.port)))?
         .map_err(connect_error)?;
     stream.set_nodelay(true)?;
     let handler = Client { host: params.host.clone(), port: params.port, conn: Arc::clone(conn) };
@@ -155,9 +155,9 @@ async fn authenticate(handle: &mut client::Handle<Client>, user: &str, params: &
     let mut methods: Option<MethodSet> = None;
 
     if let Some(pem) = &params.private_key {
-        let key = load_key(pem, params.passphrase.as_ref().map(|p| p.as_str()), "den hinterlegten Schlüssel", conn)
+        let key = load_key(pem, params.passphrase.as_ref().map(|p| p.as_str()), ts!("den hinterlegten Schlüssel", "the stored key"), conn)
             .await
-            .map_err(|e| anyhow!("Hinterlegter Schlüssel ist ungültig: {e}"))?;
+            .map_err(|e| anyhow!(t!("Hinterlegter Schlüssel ist ungültig: {e}", "Stored key is invalid: {e}")))?;
         if let Some(key) = key {
             match try_key(handle, user, key).await? {
                 AuthResult::Success => return Ok(()),
@@ -183,7 +183,10 @@ async fn authenticate(handle: &mut client::Handle<Client>, user: &str, params: &
 
     let allows = |kind: MethodKind| methods.as_ref().is_none_or(|m| m.contains(&kind));
     if !allows(MethodKind::Password) && !allows(MethodKind::KeyboardInteractive) {
-        bail!("Anmeldung als „{user}“ fehlgeschlagen: Der Server akzeptiert nur Schlüssel, und keiner passte");
+        bail!(t!(
+            "Anmeldung als „{user}“ fehlgeschlagen: Der Server akzeptiert nur Schlüssel, und keiner passte",
+            "Login as \"{user}\" failed: the server only accepts keys, and none matched"
+        ));
     }
 
     let mut password = params.password.clone();
@@ -193,11 +196,11 @@ async fn authenticate(handle: &mut client::Handle<Client>, user: &str, params: &
             Some(pw) => pw,
             None => {
                 let message = if rejected {
-                    format!("Passwort für {target} wurde abgelehnt. Erneut eingeben:")
+                    t!("Passwort für {target} wurde abgelehnt. Erneut eingeben:", "Password for {target} was rejected. Enter again:")
                 } else {
-                    format!("Passwort für {target}:")
+                    t!("Passwort für {target}:", "Password for {target}:")
                 };
-                conn.ask(message, true).await.ok_or_else(|| anyhow!("Anmeldung abgebrochen"))?
+                conn.ask(message, true).await.ok_or_else(|| anyhow!(t!("Anmeldung abgebrochen", "Login cancelled")))?
             }
         };
         if allows(MethodKind::Password) && handle.authenticate_password(user, pw.as_str()).await?.success() {
@@ -208,7 +211,10 @@ async fn authenticate(handle: &mut client::Handle<Client>, user: &str, params: &
         }
         rejected = true;
     }
-    bail!("Anmeldung als „{user}“ fehlgeschlagen: Passwort falsch oder vom Server nicht akzeptiert")
+    bail!(t!(
+        "Anmeldung als „{user}“ fehlgeschlagen: Passwort falsch oder vom Server nicht akzeptiert",
+        "Login as \"{user}\" failed: wrong password or not accepted by the server"
+    ))
 }
 
 async fn try_key(handle: &mut client::Handle<Client>, user: &str, key: PrivateKey) -> Result<AuthResult> {
@@ -226,13 +232,13 @@ async fn load_key(pem: &str, passphrase: Option<&str>, label: &str, conn: &Conn)
         Err(_) if passphrase.is_some() => {}
         Err(e) => return Err(e.into()),
     }
-    let mut message = format!("Passphrase für {label}:");
+    let mut message = t!("Passphrase für {label}:", "Passphrase for {label}:");
     for _ in 0..MAX_PROMPTS {
         let Some(answer) = conn.ask(message.clone(), true).await else { return Ok(None) };
         if let Ok(key) = keys::decode_secret_key(pem, Some(&answer)) {
             return Ok(Some(key));
         }
-        message = format!("Passphrase für {label} ist falsch. Erneut eingeben:");
+        message = t!("Passphrase für {label} ist falsch. Erneut eingeben:", "Passphrase for {label} is wrong. Enter again:");
     }
     Ok(None)
 }
@@ -290,7 +296,7 @@ async fn keyboard_interactive(handle: &mut client::Handle<Client>, user: &str, p
                         answers.push(password.to_owned());
                     } else {
                         let answer = conn.ask(prompt.prompt.trim().to_owned(), !prompt.echo).await;
-                        answers.push(answer.map(|a| a.to_string()).ok_or_else(|| anyhow!("Anmeldung abgebrochen"))?);
+                        answers.push(answer.map(|a| a.to_string()).ok_or_else(|| anyhow!(t!("Anmeldung abgebrochen", "Login cancelled")))?);
                     }
                 }
                 response = handle.authenticate_keyboard_interactive_respond(answers).await?;
@@ -304,11 +310,14 @@ async fn keyboard_interactive(handle: &mut client::Handle<Client>, user: &str, p
 pub(crate) fn connect_error(e: std::io::Error) -> anyhow::Error {
     const EHOSTUNREACH_MACOS: i32 = 65;
     if cfg!(target_os = "macos") && e.raw_os_error() == Some(EHOSTUNREACH_MACOS) {
-        return anyhow!(
+        return anyhow!(t!(
             "{e}. Vermutlich blockiert macOS den Zugriff aufs lokale Netzwerk: ConMgr als App starten \
              (scripts/bundle-macos.sh) und den Zugriff erlauben, oder unter Systemeinstellungen → \
-             Datenschutz & Sicherheit → Lokales Netzwerk freigeben."
-        );
+             Datenschutz & Sicherheit → Lokales Netzwerk freigeben.",
+            "{e}. macOS is probably blocking local network access: start ConMgr as an app \
+             (scripts/bundle-macos.sh) and allow access, or enable it under System Settings → \
+             Privacy & Security → Local Network."
+        ));
     }
     e.into()
 }
@@ -359,27 +368,29 @@ impl client::Handler for Client {
     /// muss der Benutzer bestätigen, geänderte Keys werden immer abgelehnt.
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {
-            return Err(ClientError::HostKey("Host-Zertifikate werden noch nicht unterstützt".into()));
+            return Err(ClientError::HostKey(t!("Host-Zertifikate werden noch nicht unterstützt", "Host certificates are not supported yet")));
         };
         match keys::check_known_hosts(&self.host, self.port, key) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
             Err(keys::Error::KeyChanged { line }) => {
-                return Err(ClientError::HostKey(format!(
+                return Err(ClientError::HostKey(t!(
                     "WARNUNG: Der Host-Key von {} hat sich geändert (~/.ssh/known_hosts, Zeile {line}). \
                      Möglicherweise wird die Verbindung abgehört — abgebrochen.",
+                    "WARNING: The host key of {} has changed (~/.ssh/known_hosts, line {line}). \
+                     Someone may be eavesdropping — aborted.",
                     self.host
                 )));
             }
-            Err(e) => return Err(ClientError::HostKey(format!("known_hosts kann nicht gelesen werden: {e}"))),
+            Err(e) => return Err(ClientError::HostKey(t!("known_hosts kann nicht gelesen werden: {e}", "Cannot read known_hosts: {e}"))),
         }
 
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         if !self.conn.ask_host_key(fingerprint, key.algorithm().to_string()).await {
-            return Err(ClientError::HostKey("Host-Key nicht bestätigt — Verbindung abgebrochen".into()));
+            return Err(ClientError::HostKey(t!("Host-Key nicht bestätigt — Verbindung abgebrochen", "Host key not confirmed — connection aborted")));
         }
         keys::known_hosts::learn_known_hosts(&self.host, self.port, key)
-            .map_err(|e| ClientError::HostKey(format!("Host-Key konnte nicht gespeichert werden: {e}")))?;
+            .map_err(|e| ClientError::HostKey(t!("Host-Key konnte nicht gespeichert werden: {e}", "Could not save host key: {e}")))?;
         Ok(true)
     }
 }
@@ -408,7 +419,7 @@ impl SshSession {
         runtime.spawn(async move {
             let message = match run_shell(params, &task_conn, &task_parser, input_rx).await {
                 Ok(message) => message,
-                Err(e) => format!("Fehler: {e:#}"),
+                Err(e) => t!("Fehler: {e:#}", "Error: {e:#}"),
             };
             task_conn.set_status(Status::Closed(message));
         });
@@ -473,15 +484,15 @@ async fn run_shell(
                 Some(Input::Close) | None => {
                     let _ = writer.eof().await;
                     let _ = handle.disconnect(Disconnect::ByApplication, "", "de").await;
-                    return Ok("Verbindung getrennt".into());
+                    return Ok(t!("Verbindung getrennt", "Disconnected"));
                 }
             },
         }
     }
     let _ = handle.disconnect(Disconnect::ByApplication, "", "de").await;
     Ok(match exit_status {
-        Some(code) => format!("Sitzung beendet (Exit-Code {code})"),
-        None => "Sitzung beendet".into(),
+        Some(code) => t!("Sitzung beendet (Exit-Code {code})", "Session ended (exit code {code})"),
+        None => t!("Sitzung beendet", "Session ended"),
     })
 }
 

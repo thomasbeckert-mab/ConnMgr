@@ -78,8 +78,8 @@ impl SftpSessionHandle {
         let (task_conn, task_listing) = (Arc::clone(&conn), Arc::clone(&listing));
         runtime.spawn(async move {
             let message = match run(params, &task_conn, task_listing, rx).await {
-                Ok(()) => "Verbindung getrennt".to_owned(),
-                Err(e) => format!("Fehler: {e:#}"),
+                Ok(()) => t!("Verbindung getrennt", "Disconnected"),
+                Err(e) => t!("Fehler: {e:#}", "Error: {e:#}"),
             };
             task_conn.set_status(Status::Closed(message));
         });
@@ -138,15 +138,15 @@ async fn run(
     loop {
         match channel.wait().await {
             Some(ChannelMsg::Success) => break,
-            Some(ChannelMsg::Failure) => bail!("Der Server bietet kein SFTP an (Subsystem „sftp“ fehlt)"),
+            Some(ChannelMsg::Failure) => bail!(t!("Der Server bietet kein SFTP an (Subsystem „sftp“ fehlt)", "The server does not offer SFTP (subsystem \"sftp\" missing)")),
             Some(_) => {}
-            None => bail!("Der Server hat den Kanal geschlossen"),
+            None => bail!(t!("Der Server hat den Kanal geschlossen", "The server closed the channel")),
         }
     }
     let sftp = tokio::time::timeout(INIT_TIMEOUT, SftpSession::new(channel.into_stream()))
         .await
-        .map_err(|_| anyhow!("Zeitüberschreitung beim Start von SFTP"))?
-        .map_err(|e| anyhow!("SFTP nicht verfügbar: {e}"))?;
+        .map_err(|_| anyhow!(t!("Zeitüberschreitung beim Start von SFTP", "Timed out starting SFTP")))?
+        .map_err(|e| anyhow!(t!("SFTP nicht verfügbar: {e}", "SFTP not available: {e}")))?;
     let sftp = Arc::new(sftp);
     let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
     lock(&listing).home = home.clone();
@@ -173,7 +173,7 @@ async fn run(
             Cmd::Mkdir(path) => sftp.create_dir(path).await.map_err(Into::into),
             Cmd::Rename { from, to } => sftp.rename(from, to).await.map_err(Into::into),
             Cmd::Delete { path, is_dir: true } => {
-                sftp.remove_dir(path).await.map_err(|e| anyhow!("{e} (nur leere Ordner lassen sich löschen)"))
+                sftp.remove_dir(path).await.map_err(|e| anyhow!(t!("{e} (nur leere Ordner lassen sich löschen)", "{e} (only empty folders can be deleted)")))
             }
             Cmd::Delete { path, is_dir: false } => sftp.remove_file(path).await.map_err(Into::into),
         };
@@ -290,7 +290,7 @@ async fn transfer(sftp: &SftpSession, dir: Direction, progress: impl Fn(u64, u64
             target.flush().await?;
         }
         Direction::Upload { local, remote_dir } => {
-            let name = local.file_name().ok_or_else(|| anyhow!("Ungültiger Dateiname"))?.to_string_lossy().into_owned();
+            let name = local.file_name().ok_or_else(|| anyhow!(t!("Ungültiger Dateiname", "Invalid file name")))?.to_string_lossy().into_owned();
             let total = tokio::fs::metadata(&local).await?.len();
             let mut source = tokio::fs::File::open(&local).await?;
             let mut target = sftp.create(join(&remote_dir, &name)).await?;
@@ -360,24 +360,24 @@ impl SftpView {
         }
 
         ui.horizontal(|ui| {
-            if ui.button("⬆").on_hover_text("Übergeordneter Ordner").clicked() {
+            if ui.button("⬆").on_hover_text(ts!("Übergeordneter Ordner", "Parent folder")).clicked() {
                 session.send(Cmd::List(parent(&path)));
             }
-            if ui.button("🏠").on_hover_text("Home-Verzeichnis").clicked() {
+            if ui.button("🏠").on_hover_text(ts!("Home-Verzeichnis", "Home directory")).clicked() {
                 session.send(Cmd::List(home.clone()));
             }
-            if ui.button("🔄").on_hover_text("Aktualisieren").clicked() {
+            if ui.button("🔄").on_hover_text(ts!("Aktualisieren", "Refresh")).clicked() {
                 session.send(Cmd::List(path.clone()));
             }
             let field = ui.add(egui::TextEdit::singleline(&mut self.path_input).desired_width(ui.available_width() - 230.0));
             if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 session.send(Cmd::List(self.path_input.clone()));
             }
-            if ui.button("📁 Neuer Ordner").clicked() {
+            if ui.button(ts!("📁 Neuer Ordner", "📁 New folder")).clicked() {
                 self.edit = Some(Edit::Mkdir(String::new()));
             }
-            if ui.button("⬆ Hochladen …").clicked() {
-                for local in rfd::FileDialog::new().set_title("Dateien hochladen").pick_files().unwrap_or_default() {
+            if ui.button(ts!("⬆ Hochladen …", "⬆ Upload …")).clicked() {
+                for local in rfd::FileDialog::new().set_title(ts!("Dateien hochladen", "Upload files")).pick_files().unwrap_or_default() {
                     session.send(Cmd::Upload { local, remote_dir: path.clone() });
                 }
             }
@@ -433,7 +433,7 @@ impl SftpView {
             .column(Column::auto().at_least(130.0))
             .column(Column::auto().at_least(90.0))
             .header(20.0, |mut header| {
-                for title in ["Name", "Größe", "Geändert", "Rechte"] {
+                for title in [ts!("Name", "Name"), ts!("Größe", "Size"), ts!("Geändert", "Modified"), ts!("Rechte", "Permissions")] {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -477,19 +477,19 @@ impl SftpView {
                         self.selected = Some(entry.name.clone());
                     }
                     response.context_menu(|ui| {
-                        if entry.is_dir && ui.button("Öffnen").clicked() {
+                        if entry.is_dir && ui.button(ts!("Öffnen", "Open")).clicked() {
                             session.send(Cmd::List(remote.clone()));
                             ui.close_menu();
                         }
-                        if !entry.is_dir && ui.button("⬇ Herunterladen …").clicked() {
+                        if !entry.is_dir && ui.button(ts!("⬇ Herunterladen …", "⬇ Download …")).clicked() {
                             download(session, &remote, &entry.name);
                             ui.close_menu();
                         }
-                        if ui.button("✏ Umbenennen …").clicked() {
+                        if ui.button(ts!("✏ Umbenennen …", "✏ Rename …")).clicked() {
                             self.edit = Some(Edit::Rename { from: entry.name.clone(), to: entry.name.clone() });
                             ui.close_menu();
                         }
-                        if ui.button("🗑 Löschen …").clicked() {
+                        if ui.button(ts!("🗑 Löschen …", "🗑 Delete …")).clicked() {
                             self.edit = Some(Edit::Delete { name: entry.name.clone(), is_dir: entry.is_dir });
                             ui.close_menu();
                         }
@@ -501,9 +501,9 @@ impl SftpView {
     fn edit_dialog(&mut self, ctx: &egui::Context, session: &SftpSessionHandle, path: &str) {
         let Some(edit) = &mut self.edit else { return };
         let title = match edit {
-            Edit::Mkdir(_) => "Neuer Ordner",
-            Edit::Rename { .. } => "Umbenennen",
-            Edit::Delete { .. } => "Löschen",
+            Edit::Mkdir(_) => ts!("Neuer Ordner", "New folder"),
+            Edit::Rename { .. } => ts!("Umbenennen", "Rename"),
+            Edit::Delete { .. } => ts!("Löschen", "Delete"),
         };
         let mut close = false;
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
@@ -515,12 +515,15 @@ impl SftpView {
                     submit = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 }
                 Edit::Delete { name, is_dir } => {
-                    let what = if *is_dir { "Ordner" } else { "Datei" };
-                    ui.label(format!("{what} „{name}“ wirklich löschen?"));
+                    ui.label(if *is_dir {
+                        t!("Ordner „{name}“ wirklich löschen?", "Really delete folder \"{name}\"?")
+                    } else {
+                        t!("Datei „{name}“ wirklich löschen?", "Really delete file \"{name}\"?")
+                    });
                 }
             }
             ui.horizontal(|ui| {
-                let ok = if matches!(edit, Edit::Delete { .. }) { "Löschen" } else { "OK" };
+                let ok = if matches!(edit, Edit::Delete { .. }) { ts!("Löschen", "Delete") } else { "OK" };
                 if ui.button(ok).clicked() || submit {
                     match edit {
                         Edit::Mkdir(name) if !name.trim().is_empty() => session.send(Cmd::Mkdir(join(path, name.trim()))),
@@ -532,7 +535,7 @@ impl SftpView {
                     }
                     close = true;
                 }
-                if ui.button("Abbrechen").clicked() {
+                if ui.button(ts!("Abbrechen", "Cancel")).clicked() {
                     close = true;
                 }
             });
