@@ -21,6 +21,14 @@ open target/release/bundle/ConMgr.app
 
 Beim ersten Verbinden fragt macOS einmal nach; die Freigabe lässt sich unter *Systemeinstellungen → Datenschutz & Sicherheit → Lokales Netzwerk* ändern.
 
+Damit die Freigabe über Neubauten erhalten bleibt, einmalig ein lokales Signatur-Zertifikat anlegen (selbst signiert, nur für `codesign`, im Anmelde-Schlüsselbund):
+
+```bash
+./scripts/create-signing-cert-macos.sh
+```
+
+`bundle-macos.sh` signiert dann damit; ohne Zertifikat signiert es ad-hoc, und macOS verwirft die Freigabe bei jedem Neubau.
+
 ## Verbindungsdatei
 
 Standardpfad:

@@ -33,6 +33,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc-Signatur, damit macOS die Berechtigung der App zuordnen kann.
-codesign --force --sign - "$APP"
+# Mit dem lokalen Zertifikat bleibt die Signatur-Anforderung über Neubauten gleich,
+# und macOS behält die Freigabe „Lokales Netzwerk“. Ad-hoc ändert sie bei jedem Bau.
+IDENTITY="ConMgr Local Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -q "\"$IDENTITY\""; then
+    codesign --force --sign "$IDENTITY" "$APP"
+else
+    codesign --force --sign - "$APP"
+    echo "Hinweis: ad-hoc signiert – nach jedem Neubau muss die Freigabe „Lokales Netzwerk“"
+    echo "neu gesetzt werden. Abhilfe: ./scripts/create-signing-cert-macos.sh"
+fi
 echo "Fertig: $APP"
