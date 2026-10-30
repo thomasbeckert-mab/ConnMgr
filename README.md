@@ -37,7 +37,7 @@ Bis Oktober 2026 hieß die App „ConMgr“. Beim ersten Start übernimmt ConnMg
 
 ### Logo
 
-`assets/logo.svg` ist die einzige Quelle: Die App zeigt es auf dem Sperrbildschirm und als Hintergrund, solange keine Sitzung offen ist, und erzeugt daraus das Fenster-Icon. `bundle-macos.sh` rendert es mit `cargo run --example render_icon` in ein Iconset und baut daraus `AppIcon.icns`.
+`assets/logo.svg` (mit runden Ecken) zeigt die App auf dem Sperrbildschirm und als Hintergrund, solange keine Sitzung offen ist, und erzeugt daraus das Fenster-Icon. Für das macOS-App-Icon gibt es `assets/icon-macos.svg`: dasselbe Motiv **randlos und ohne eigene Ecken**, denn seit macOS 26 schneidet das System die Form selbst zu und stellt Icons mit Rand verkleinert auf einer Kachel dar. `bundle-macos.sh` rendert es mit `cargo run --example render_icon` in ein Iconset und baut daraus `AppIcon.icns`. Beide Dateien bei Änderungen am Motiv gemeinsam anpassen.
 
 ## Verbindungsdatei
 

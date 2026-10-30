@@ -13,7 +13,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/connmgr "$APP/Contents/MacOS/connmgr"
 
-# App-Icon aus assets/logo.svg
+# App-Icon aus assets/icon-macos.svg (randlos; macOS schneidet die Form selbst zu)
 ICONSET=target/release/bundle/AppIcon.iconset
 rm -rf "$ICONSET"
 cargo run --quiet --release --example render_icon -- "$ICONSET"
@@ -61,4 +61,6 @@ else
     echo "Hinweis: ad-hoc signiert – nach jedem Neubau muss die Freigabe „Lokales Netzwerk“"
     echo "neu gesetzt werden. Abhilfe: ./scripts/create-signing-cert-macos.sh"
 fi
+# Finder und Dock zwischenspeichern Icons; geänderte Zeitstempel lassen sie neu lesen.
+touch "$APP" "$APP/Contents/Info.plist"
 echo "Fertig: $APP"
