@@ -1,38 +1,33 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- ConMgr: ein Terminal als Zentrale, sternförmig mit vier Gegenstellen verbunden. -->
+  <!-- ConnMgr: ein Terminal als Zentrale, sternförmig mit vier Gegenstellen verbunden. -->
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2563EB"/>
-      <stop offset="1" stop-color="#0D9488"/>
-    </linearGradient>
-    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
-      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1C1C1E"/>
+      <stop offset="1" stop-color="#000000"/>
     </linearGradient>
   </defs>
 
-  <!-- Grundfläche mit macOS-üblichem Rand (824 px Inhalt in 1024 px) -->
+  <!-- Grundfläche schwarz, mit macOS-üblichem Rand (824 px Inhalt in 1024 px) -->
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#shine)"/>
 
   <!-- Verbindungen -->
   <g stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="34" stroke-linecap="round">
-    <line x1="512" y1="512" x2="292" y2="292"/>
-    <line x1="512" y1="512" x2="732" y2="292"/>
-    <line x1="512" y1="512" x2="292" y2="732"/>
-    <line x1="512" y1="512" x2="732" y2="732"/>
+    <line x1="512" y1="512" x2="272" y2="272"/>
+    <line x1="512" y1="512" x2="752" y2="272"/>
+    <line x1="512" y1="512" x2="272" y2="752"/>
+    <line x1="512" y1="512" x2="752" y2="752"/>
   </g>
 
   <!-- Gegenstellen -->
   <g fill="#FFFFFF">
-    <circle cx="292" cy="292" r="58"/>
-    <circle cx="732" cy="292" r="58"/>
-    <circle cx="292" cy="732" r="58"/>
-    <circle cx="732" cy="732" r="58"/>
+    <circle cx="272" cy="272" r="56"/>
+    <circle cx="752" cy="272" r="56"/>
+    <circle cx="272" cy="752" r="56"/>
+    <circle cx="752" cy="752" r="56"/>
   </g>
 
-  <!-- Zentrale: Terminal mit Eingabeaufforderung -->
-  <rect x="362" y="397" width="300" height="230" rx="44" fill="#0F172A" stroke="#FFFFFF" stroke-width="18"/>
-  <path d="M430 468 L492 512 L430 556" fill="none" stroke="#38BDF8" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="522" y1="560" x2="592" y2="560" stroke="#FFFFFF" stroke-width="32" stroke-linecap="round"/>
+  <!-- Zentrale: Terminal mit Eingabeaufforderung (größer als zuvor) -->
+  <rect x="317" y="362" width="390" height="300" rx="56" fill="#0F172A" stroke="#FFFFFF" stroke-width="20"/>
+  <path d="M400 452 L478 512 L400 572" fill="none" stroke="#38BDF8" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="518" y1="578" x2="610" y2="578" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round"/>
 </svg>

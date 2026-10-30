@@ -1,5 +1,5 @@
 #!/bin/sh
-# Baut ConMgr.app. Als eigene App fragt macOS beim ersten Verbinden nach der
+# Baut ConnMgr.app. Als eigene App fragt macOS beim ersten Verbinden nach der
 # Berechtigung „Lokales Netzwerk“ – aus fremden Terminals gestartet gilt sonst
 # deren Berechtigung (und Verbindungen ins LAN scheitern mit „No route to host“).
 set -eu
@@ -8,10 +8,10 @@ cd "$(dirname "$0")/.."
 cargo build --release
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-APP=target/release/bundle/ConMgr.app
+APP=target/release/bundle/ConnMgr.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/conmgr "$APP/Contents/MacOS/conmgr"
+cp target/release/connmgr "$APP/Contents/MacOS/connmgr"
 
 # App-Icon aus assets/logo.svg
 ICONSET=target/release/bundle/AppIcon.iconset
@@ -24,10 +24,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>ConMgr</string>
-    <key>CFBundleDisplayName</key><string>ConMgr</string>
+    <key>CFBundleName</key><string>ConnMgr</string>
+    <key>CFBundleDisplayName</key><string>ConnMgr</string>
     <key>CFBundleIdentifier</key><string>app.conmgr.ConMgr</string>
-    <key>CFBundleExecutable</key><string>conmgr</string>
+    <!-- Kennung bleibt vom alten Namen ConMgr: an ihr hängt die Freigabe „Lokales Netzwerk“. -->
+    <key>CFBundleExecutable</key><string>connmgr</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
@@ -35,7 +36,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>ConMgr connects to computers on your network via SSH, SFTP, RDP and VNC.</string>
+    <string>ConnMgr connects to computers on your network via SSH, SFTP, RDP and VNC.</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleLocalizations</key><array><string>en</string><string>de</string></array>
 </dict>
@@ -44,13 +45,14 @@ PLIST
 
 # Übersetzter Text für die macOS-Rückfrage „Lokales Netzwerk“.
 mkdir -p "$APP/Contents/Resources/en.lproj" "$APP/Contents/Resources/de.lproj"
-echo '"NSLocalNetworkUsageDescription" = "ConMgr connects to computers on your network via SSH, SFTP, RDP and VNC.";' \
+echo '"NSLocalNetworkUsageDescription" = "ConnMgr connects to computers on your network via SSH, SFTP, RDP and VNC.";' \
     > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
-echo '"NSLocalNetworkUsageDescription" = "ConMgr verbindet sich per SSH, SFTP, RDP und VNC mit Rechnern in deinem Netzwerk.";' \
+echo '"NSLocalNetworkUsageDescription" = "ConnMgr verbindet sich per SSH, SFTP, RDP und VNC mit Rechnern in deinem Netzwerk.";' \
     > "$APP/Contents/Resources/de.lproj/InfoPlist.strings"
 
 # Mit dem lokalen Zertifikat bleibt die Signatur-Anforderung über Neubauten gleich,
 # und macOS behält die Freigabe „Lokales Netzwerk“. Ad-hoc ändert sie bei jedem Bau.
+# Name des Zertifikats im Schlüsselbund (vom alten App-Namen ConMgr, nicht sichtbar).
 IDENTITY="ConMgr Local Signing"
 if security find-identity -p codesigning 2>/dev/null | grep -q "\"$IDENTITY\""; then
     codesign --force --sign "$IDENTITY" "$APP"

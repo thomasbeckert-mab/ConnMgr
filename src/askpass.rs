@@ -16,7 +16,7 @@ use rand::RngCore;
 use zeroize::Zeroizing;
 
 /// Gesetzt, wenn dieses Programm als Askpass-Helfer läuft: `<adresse>/<token>`.
-pub const ENV_VAR: &str = "CONMGR_ASKPASS";
+pub const ENV_VAR: &str = "CONNMGR_ASKPASS";
 const TICKET_TTL: Duration = Duration::from_secs(120);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -177,7 +177,7 @@ mod tests {
     /// Startet das gebaute Programm so, wie ssh es als Askpass-Helfer aufruft.
     #[test]
     fn helper_binary_end_to_end() {
-        let exe = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("conmgr");
+        let exe = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("connmgr");
         assert!(exe.exists(), "{} fehlt — vorher `cargo build` ausführen", exe.display());
         let server = Server::start().unwrap();
         let env = server.issue(Zeroizing::new("s3cret".into())).unwrap();

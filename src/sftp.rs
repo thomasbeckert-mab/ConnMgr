@@ -644,12 +644,12 @@ mod tests {
     }
 
     /// Server ohne SFTP-Subsystem: klare Fehlermeldung statt endlosem „Verbinde …“.
-    /// Läuft gegen einen sshd ohne `Subsystem sftp` (Port in CONMGR_E2E_NOSFTP_PORT).
+    /// Läuft gegen einen sshd ohne `Subsystem sftp` (Port in CONNMGR_E2E_NOSFTP_PORT).
     #[test]
     #[ignore]
     fn e2e_sftp_missing_subsystem() {
         use crate::ssh::tests::e2e_params;
-        let port: u16 = std::env::var("CONMGR_E2E_NOSFTP_PORT").expect("CONMGR_E2E_NOSFTP_PORT").parse().unwrap();
+        let port: u16 = std::env::var("CONNMGR_E2E_NOSFTP_PORT").expect("CONNMGR_E2E_NOSFTP_PORT").parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let session = SftpSessionHandle::start(runtime.handle(), egui::Context::default(), e2e_params(port));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -687,9 +687,9 @@ mod tests {
         };
         until("Home-Liste", &|l| !l.loading && !l.path.is_empty());
 
-        let work = std::env::temp_dir().join(format!("conmgr-sftp-{}", uuid::Uuid::new_v4()));
+        let work = std::env::temp_dir().join(format!("connmgr-sftp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work).unwrap();
-        let remote_dir = join(&session.listing().path, &format!("conmgr-e2e-{}", uuid::Uuid::new_v4()));
+        let remote_dir = join(&session.listing().path, &format!("connmgr-e2e-{}", uuid::Uuid::new_v4()));
 
         session.send(Cmd::Mkdir(remote_dir.clone()));
         session.send(Cmd::List(remote_dir.clone()));

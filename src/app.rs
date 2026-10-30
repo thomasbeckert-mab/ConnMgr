@@ -21,7 +21,7 @@ const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 const MIN_MASTER_LEN: usize = 8;
 const ICONS: &[&str] = &["📁", "🏠", "🏢", "☁", "🧪", "⚡", "🔒", "🔑", "👤", "💻", "🖥", "🗄", "📺", "🌐", "🐧", "🔧", "🚀", "⭐"];
 
-pub struct ConMgrApp {
+pub struct ConnMgrApp {
     path: PathBuf,
     state: State,
     status: String,
@@ -332,7 +332,7 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-impl ConMgrApp {
+impl ConnMgrApp {
     pub fn new(path: PathBuf) -> Self {
         let settings = Settings::read(&path).unwrap_or_default();
         i18n::set_language(settings.effective_language());
@@ -609,7 +609,7 @@ impl ConMgrApp {
     fn runtime(&mut self) -> Result<&tokio::runtime::Runtime> {
         if self.runtime.is_none() {
             let runtime =
-                tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("conmgr-ssh").enable_all().build()?;
+                tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("connmgr-ssh").enable_all().build()?;
             self.runtime = Some(runtime);
         }
         Ok(self.runtime.as_ref().expect("gerade gestartet"))
@@ -671,7 +671,7 @@ impl ConMgrApp {
     }
 }
 
-impl Drop for ConMgrApp {
+impl Drop for ConnMgrApp {
     fn drop(&mut self) {
         self.clear_clipboard_secret();
     }
@@ -988,10 +988,10 @@ impl Session {
                     Err(anyhow!(t!("Die Passwörter stimmen nicht überein", "The passwords do not match")))
                 } else {
                     let default_name = match nodes.as_slice() {
-                        [single] if scope.is_some() => format!("{}.conmgr.json", single.name()),
-                        _ => "conmgr-export.conmgr.json".to_owned(),
+                        [single] if scope.is_some() => format!("{}.connmgr.json", single.name()),
+                        _ => "connmgr-export.connmgr.json".to_owned(),
                     };
-                    match rfd::FileDialog::new().set_file_name(default_name).add_filter("ConMgr", &["json"]).save_file() {
+                    match rfd::FileDialog::new().set_file_name(default_name).add_filter("ConnMgr", &["json"]).save_file() {
                         None => return Ok(None),
                         Some(target) => StoreFile::export(&nodes, &self.vault, password, &target)
                             .map(|()| t!("{} Einträge nach {} exportiert", "Exported {} entries to {}", nodes.iter().map(model::count).sum::<usize>(), target.display())),
@@ -1004,7 +1004,7 @@ impl Session {
                 self.delete(&id, path)
             }
             Dialog::Import { path: source, password, .. } => StoreFile::import(source, password, &self.vault).and_then(|items| {
-                let name = source.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".conmgr").to_owned()).unwrap_or_default();
+                let name = source.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".connmgr").trim_end_matches(".conmgr").to_owned()).unwrap_or_default();
                 let count: usize = items.iter().map(model::count).sum();
                 let folder = Node::Folder(Folder {
                     id: new_id(),
@@ -1051,7 +1051,7 @@ impl Session {
     }
 }
 
-impl eframe::App for ConMgrApp {
+impl eframe::App for ConnMgrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.expire_clipboard(ctx);
         self.apply_settings(ctx);
@@ -1074,7 +1074,7 @@ fn lock_ui(ctx: &egui::Context, lock: &mut LockScreen, new_file: bool, path: &Pa
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
             ui.add(egui::Image::new(crate::LOGO).fit_to_exact_size(egui::vec2(96.0, 96.0)));
-            ui.heading("ConMgr");
+            ui.heading("ConnMgr");
             ui.add_space(8.0);
             ui.label(if new_file { ts!("Neue Verbindungsdatei — Master-Passwort festlegen", "New connection file — set a master password") } else { ts!("Master-Passwort eingeben", "Enter master password") });
             ui.add_space(12.0);
@@ -1121,6 +1121,9 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // Schnellverbindung vorne, damit sie auch bei schmalem Fenster sichtbar bleibt.
+            quick_connect_field(ui, s, &mut action);
+            ui.separator();
             let parent = s.default_parent();
             if ui.button(ts!("➕ Verbindung", "➕ Connection")).clicked() {
                 action = Some(Action::New(Kind::Connection, parent.clone()));
@@ -1133,8 +1136,6 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
             }
             ui.separator();
             ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text(ts!("🔍 Suchen …", "🔍 Search …")).desired_width(150.0));
-            ui.separator();
-            quick_connect_field(ui, s, &mut action);
             ui.toggle_value(&mut s.favorites_only, ts!("⭐ Favoriten", "⭐ Favorites"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(ts!("🔒 Sperren", "🔒 Lock")).clicked() {
@@ -1148,7 +1149,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                     menu_item(ui, ts!("Alles exportieren …", "Export everything …"), &mut action, || Action::OpenDialog(Dialog::export(None)));
                     if ui.button(ts!("Importieren …", "Import …")).clicked() {
                         ui.close_menu();
-                        let picked = rfd::FileDialog::new().set_title(ts!("ConMgr-Datei importieren", "Import ConMgr file")).add_filter("ConMgr", &["json"]).pick_file();
+                        let picked = rfd::FileDialog::new().set_title(ts!("ConnMgr-Datei importieren", "Import ConnMgr file")).add_filter("ConnMgr", &["json"]).pick_file();
                         if let Some(path) = picked {
                             action = Some(Action::OpenDialog(Dialog::Import { path, password: Zeroizing::default(), error: None }));
                         }
@@ -1418,7 +1419,7 @@ fn empty_background(ui: &mut egui::Ui) {
         ui.add_space(((ui.available_height() - size - 90.0) / 2.0).max(16.0));
         ui.add(egui::Image::new(crate::LOGO).fit_to_exact_size(egui::vec2(size, size)));
         ui.add_space(8.0);
-        ui.heading("ConMgr");
+        ui.heading("ConnMgr");
         ui.add_space(6.0);
         ui.weak(ts!(
             "Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.",
@@ -2127,7 +2128,7 @@ mod tests {
 
     #[test]
     fn delete_via_tree_context_menu() {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let mut s = session();
         let mut ui = UiDriver::new(dir.join("c.json"));
         ui.frame(&mut s);
@@ -2146,7 +2147,7 @@ mod tests {
 
     #[test]
     fn delete_via_tree_context_menu_with_open_tab() {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut s = session();
         let mut ui = UiDriver::new(dir.join("c.json"));
@@ -2213,7 +2214,7 @@ mod tests {
 
     #[test]
     fn settings_dialog_switches_language_and_theme() {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let mut s = session();
         let mut ui = UiDriver::new(dir.join("c.json"));
         ui.frame(&mut s);
@@ -2250,7 +2251,7 @@ mod tests {
         for _ in 0..3 {
             ui.frame(&mut s);
         }
-        assert!(ui.has("ConMgr") && ui.has("Klick auf eine Verbindung verbindet"), "Hintergrund mit Name und Hinweis");
+        assert!(ui.has("ConnMgr") && ui.has("Klick auf eine Verbindung verbindet"), "Hintergrund mit Name und Hinweis");
     }
 
     #[test]
@@ -2275,10 +2276,10 @@ mod tests {
 
     #[test]
     fn quick_connect_opens_adhoc_tab_and_saves_it() {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("c.json");
         let ctx = egui::Context::default();
-        let mut app = ConMgrApp::new(path.clone());
+        let mut app = ConnMgrApp::new(path.clone());
         app.state = State::Unlocked(Box::new(session()));
 
         app.handle(&ctx, Action::QuickConnect("admin@127.0.0.1:1".into()));
@@ -2354,7 +2355,7 @@ mod tests {
         ui.events.push(egui::Event::PointerMoved(strip));
         ui.frame(&mut s);
         ui.frame(&mut s);
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         ui.path = dir.join("c.json");
         ui.click(&mut s, "📌", egui::PointerButton::Primary);
         assert!(s.store.settings.tree_pinned);
@@ -2364,7 +2365,7 @@ mod tests {
     #[test]
     fn status_line_clears_when_connection_ends() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut app = ConMgrApp::new(PathBuf::from("unbenutzt.json"));
+        let mut app = ConnMgrApp::new(PathBuf::from("unbenutzt.json"));
         let mut s = session();
         let session = SshSession::start(
             runtime.handle(),
@@ -2462,7 +2463,7 @@ mod tests {
 
     #[test]
     fn save_new_connection_into_folder_and_duplicate() {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("c.json");
         let mut s = session();
 

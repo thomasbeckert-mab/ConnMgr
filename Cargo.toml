@@ -1,5 +1,5 @@
 [package]
-name = "conmgr"
+name = "connmgr"
 version = "0.1.0"
 edition = "2021"
 description = "Plattformübergreifender Verbindungsmanager für SSH, SFTP, RDP und VNC"

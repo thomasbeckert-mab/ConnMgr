@@ -152,7 +152,7 @@ fn rdp(conn: &Connection, password: Option<&str>) -> Result<Launched> {
 fn rdp(conn: &Connection, _password: Option<&str>) -> Result<Launched> {
     // .rdp-Dateien öffnet die "Windows App" (ehem. Microsoft Remote Desktop); sie nimmt kein Passwort entgegen.
     let safe_id: String = conn.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-    let path = std::env::temp_dir().join(format!("conmgr-{safe_id}.rdp"));
+    let path = std::env::temp_dir().join(format!("connmgr-{safe_id}.rdp"));
     let mut content = format!("full address:s:{}\r\n", conn.host_port());
     if !conn.username.is_empty() {
         content.push_str(&format!("username:s:{}\r\n", conn.username));

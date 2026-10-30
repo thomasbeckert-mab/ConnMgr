@@ -1081,7 +1081,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "conmgr"
+name = "connmgr"
 version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",

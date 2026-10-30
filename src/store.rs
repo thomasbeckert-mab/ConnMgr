@@ -11,6 +11,7 @@ use crate::i18n::Language;
 use crate::model::{Connection, CredentialSource, Node, SecretField};
 
 const FORMAT_VERSION: u32 = 2;
+/// Bleibt trotz Umbenennung in ConnMgr so: Bestehende Dateien prüfen das Master-Passwort damit.
 const VERIFIER_PLAINTEXT: &str = "conmgr-verifier-v1";
 const VERIFIER_AAD: &str = "verifier";
 
@@ -281,12 +282,40 @@ pub fn decrypt_field(
     decrypt_secret(vault, &field.aad(owner_id), enc)
 }
 
-/// z. B. ~/Library/Application Support/ConMgr/connections.json (macOS),
-/// ~/.config/conmgr/connections.json (Linux), %APPDATA%\ConMgr\config\connections.json (Windows).
+/// z. B. ~/Library/Application Support/ConnMgr/connections.json (macOS),
+/// ~/.config/connmgr/connections.json (Linux), %APPDATA%\ConnMgr\config\connections.json (Windows).
 pub fn default_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", "ConMgr")
-        .map(|d| d.config_dir().join("connections.json"))
-        .unwrap_or_else(|| PathBuf::from("connections.json"))
+    config_dir().map(|d| d.join("connections.json")).unwrap_or_else(|| PathBuf::from("connections.json"))
+}
+
+/// Ordner für Verbindungsdatei und gemerkte RDP-Zertifikate.
+pub fn config_dir() -> Option<PathBuf> {
+    let dir = directories::ProjectDirs::from("", "", "ConnMgr")?.config_dir().to_owned();
+    if let Some(legacy) = directories::ProjectDirs::from("", "", "ConMgr") {
+        migrate_legacy_dir(legacy.config_dir(), &dir);
+    }
+    Some(dir)
+}
+
+/// Bis Oktober 2026 hieß die App „ConMgr“. Gibt es nur deren Ordner, wird er übernommen,
+/// damit Verbindungen und Zertifikate nach der Umbenennung erhalten bleiben.
+fn migrate_legacy_dir(old: &Path, new: &Path) {
+    if new.exists() || !old.join("connections.json").exists() {
+        return;
+    }
+    if let Some(parent) = new.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::rename(old, new).is_ok() {
+        return;
+    }
+    // Anderes Laufwerk o. Ä.: Dateien einzeln kopieren, das Original bleibt als Sicherung.
+    let _ = fs::create_dir_all(new);
+    for name in ["connections.json", "rdp_certificates.json"] {
+        if old.join(name).exists() {
+            let _ = fs::copy(old.join(name), new.join(name));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,7 +324,7 @@ mod tests {
     use crate::model::{self, CredentialSource, Credential};
 
     fn temp_path() -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("conmgr-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("connections.json");
         (dir, path)
     }
@@ -417,6 +446,25 @@ mod tests {
         assert_eq!(pw.as_str(), "pw");
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_folder_is_taken_over() {
+        let base = std::env::temp_dir().join(format!("connmgr-test-{}", uuid::Uuid::new_v4()));
+        let (old, new) = (base.join("ConMgr"), base.join("ConnMgr"));
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("connections.json"), "{}").unwrap();
+        fs::write(old.join("rdp_certificates.json"), "{}").unwrap();
+        migrate_legacy_dir(&old, &new);
+        assert!(new.join("connections.json").exists() && new.join("rdp_certificates.json").exists());
+        assert!(!old.exists(), "verschoben, nicht kopiert");
+
+        // Gibt es den neuen Ordner schon, bleibt alles, wie es ist.
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("connections.json"), "alt").unwrap();
+        migrate_legacy_dir(&old, &new);
+        assert_eq!(fs::read_to_string(new.join("connections.json")).unwrap(), "{}");
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

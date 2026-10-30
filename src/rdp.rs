@@ -5,7 +5,7 @@
 //! Deaktivierung/Reaktivierung, Text in der Zwischenablage über CLIPRDR in beide Richtungen.
 //!
 //! TLS-Zertifikate werden wie SSH-Host-Keys behandelt: Lässt sich ein Zertifikat nicht
-//! prüfen (bei RDP-Servern meist selbst signiert), fragt ConMgr nach und merkt sich den
+//! prüfen (bei RDP-Servern meist selbst signiert), fragt ConnMgr nach und merkt sich den
 //! Fingerabdruck; ein geänderter Fingerabdruck wird abgelehnt.
 
 use std::collections::BTreeMap;
@@ -533,7 +533,7 @@ fn build_config(
         desktop_scale_factor: scale_percent,
         bitmap: None,
         client_build: 0,
-        client_name: "ConMgr".to_owned(),
+        client_name: "ConnMgr".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
         platform: if cfg!(target_os = "macos") {
             MajorPlatformType::MACINTOSH
@@ -579,8 +579,8 @@ fn certificates_path() -> PathBuf {
     if let Some(path) = TEST_CERTIFICATES_PATH.lock().unwrap().clone() {
         return path;
     }
-    directories::ProjectDirs::from("", "", "ConMgr")
-        .map(|d| d.config_dir().join("rdp_certificates.json"))
+    crate::store::config_dir()
+        .map(|d| d.join("rdp_certificates.json"))
         .unwrap_or_else(|| PathBuf::from("rdp_certificates.json"))
 }
 
@@ -999,7 +999,7 @@ mod tests {
     /// Zertifikat bestätigen, merken, beim nächsten Mal ohne Rückfrage; anderes Zertifikat ablehnen.
     #[test]
     fn tls_certificate_trust_on_first_use() {
-        let dir = std::env::temp_dir().join(format!("conmgr-rdp-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("connmgr-rdp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let Some((cert, key, expected)) = openssl_cert(&dir, "a") else {
             eprintln!("openssl fehlt – Test übersprungen");

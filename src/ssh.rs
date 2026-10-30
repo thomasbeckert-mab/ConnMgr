@@ -311,10 +311,10 @@ pub(crate) fn connect_error(e: std::io::Error) -> anyhow::Error {
     const EHOSTUNREACH_MACOS: i32 = 65;
     if cfg!(target_os = "macos") && e.raw_os_error() == Some(EHOSTUNREACH_MACOS) {
         return anyhow!(t!(
-            "{e}. Vermutlich blockiert macOS den Zugriff aufs lokale Netzwerk: ConMgr als App starten \
+            "{e}. Vermutlich blockiert macOS den Zugriff aufs lokale Netzwerk: ConnMgr als App starten \
              (scripts/bundle-macos.sh) und den Zugriff erlauben, oder unter Systemeinstellungen → \
              Datenschutz & Sicherheit → Lokales Netzwerk freigeben.",
-            "{e}. macOS is probably blocking local network access: start ConMgr as an app \
+            "{e}. macOS is probably blocking local network access: start ConnMgr as an app \
              (scripts/bundle-macos.sh) and allow access, or enable it under System Settings → \
              Privacy & Security → Local Network."
         ));
@@ -532,14 +532,14 @@ pub mod tests {
     }
 
     pub fn e2e_port() -> u16 {
-        std::env::var("CONMGR_E2E_SSH_PORT").expect("CONMGR_E2E_SSH_PORT").parse().unwrap()
+        std::env::var("CONNMGR_E2E_SSH_PORT").expect("CONNMGR_E2E_SSH_PORT").parse().unwrap()
     }
 
     fn home() -> PathBuf {
         directories::BaseDirs::new().unwrap().home_dir().to_owned()
     }
 
-    /// Gegen einen echten sshd: `CONMGR_E2E_SSH_PORT=2222 HOME=<test-home> cargo test e2e -- --ignored --test-threads=1`.
+    /// Gegen einen echten sshd: `CONNMGR_E2E_SSH_PORT=2222 HOME=<test-home> cargo test e2e -- --ignored --test-threads=1`.
     /// HOME muss auf ein Testverzeichnis zeigen (Schlüssel in .ssh, known_hosts wird dort angelegt).
     #[test]
     #[ignore]
@@ -554,11 +554,11 @@ pub mod tests {
         wait_for(session.conn(), "Verbindung", |s| matches!(s, Status::Connected));
 
         session.resize(100, 30);
-        session.send(b"echo conmgr-ok-$((40+2)); stty size\r".to_vec());
+        session.send(b"echo connmgr-ok-$((40+2)); stty size\r".to_vec());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let text = session.parser().screen().contents();
-            if text.contains("conmgr-ok-42") && text.contains("30 100") {
+            if text.contains("connmgr-ok-42") && text.contains("30 100") {
                 break;
             }
             assert!(Instant::now() < deadline, "keine Befehlsausgabe: {text}");

@@ -40,17 +40,17 @@ fn main() -> eframe::Result {
     // Optional: eigener Pfad zur Verbindungsdatei als erstes Argument.
     let path = std::env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(store::default_path);
 
-    let mut viewport = egui::ViewportBuilder::default().with_title("ConMgr").with_inner_size([900.0, 560.0]);
+    let mut viewport = egui::ViewportBuilder::default().with_title("ConnMgr").with_inner_size([900.0, 560.0]);
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
-        "ConMgr",
+        "ConnMgr",
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(app::ConMgrApp::new(path)))
+            Ok(Box::new(app::ConnMgrApp::new(path)))
         }),
     )
 }

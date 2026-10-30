@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/logo.svg" width="128" alt="ConMgr-Logo"></p>
+<p align="center"><img src="assets/logo.svg" width="128" alt="ConnMgr-Logo"></p>
 
-# ConMgr
+# ConnMgr
 
 Plattformübergreifender Verbindungsmanager (macOS, Linux, Windows) für **SSH, SFTP, RDP und VNC**, geschrieben in Rust mit [egui/eframe](https://github.com/emilk/egui). Oberfläche auf **Deutsch und Englisch**, hell, dunkel oder wie das Betriebssystem.
 
@@ -14,11 +14,11 @@ cargo test
 
 ### macOS: als App bauen
 
-Unter macOS braucht ConMgr für Verbindungen ins lokale Netz die Berechtigung **„Lokales Netzwerk“**. Mit `cargo run` aus einem fremden Terminal (z. B. dem einer IDE) gilt dessen Berechtigung, und Verbindungen zu `192.168.x.x` scheitern mit „No route to host“. Deshalb als eigene App bauen und starten:
+Unter macOS braucht ConnMgr für Verbindungen ins lokale Netz die Berechtigung **„Lokales Netzwerk“**. Mit `cargo run` aus einem fremden Terminal (z. B. dem einer IDE) gilt dessen Berechtigung, und Verbindungen zu `192.168.x.x` scheitern mit „No route to host“. Deshalb als eigene App bauen und starten:
 
 ```bash
 ./scripts/bundle-macos.sh
-open target/release/bundle/ConMgr.app
+open target/release/bundle/ConnMgr.app
 ```
 
 Beim ersten Verbinden fragt macOS einmal nach; die Freigabe lässt sich unter *Systemeinstellungen → Datenschutz & Sicherheit → Lokales Netzwerk* ändern.
@@ -31,6 +31,10 @@ Damit die Freigabe über Neubauten erhalten bleibt, einmalig ein lokales Signatu
 
 `bundle-macos.sh` signiert dann damit; ohne Zertifikat signiert es ad-hoc, und macOS verwirft die Freigabe bei jedem Neubau.
 
+### Umbenennung ConMgr → ConnMgr
+
+Bis Oktober 2026 hieß die App „ConMgr“. Beim ersten Start übernimmt ConnMgr den alten Datenordner (`…/ConMgr` → `…/ConnMgr`) samt Verbindungsdatei und gemerkten RDP-Zertifikaten. Unverändert bleiben bewusst die macOS-Bundle-Kennung `app.conmgr.ConMgr` (an ihr hängt die Freigabe „Lokales Netzwerk“), der Name des Signatur-Zertifikats und der interne Prüftext des Master-Passworts.
+
 ### Logo
 
 `assets/logo.svg` ist die einzige Quelle: Die App zeigt es auf dem Sperrbildschirm und als Hintergrund, solange keine Sitzung offen ist, und erzeugt daraus das Fenster-Icon. `bundle-macos.sh` rendert es mit `cargo run --example render_icon` in ein Iconset und baut daraus `AppIcon.icns`.
@@ -41,9 +45,9 @@ Standardpfad:
 
 | OS      | Pfad |
 |---------|------|
-| macOS   | `~/Library/Application Support/ConMgr/connections.json` |
-| Linux   | `~/.config/conmgr/connections.json` |
-| Windows | `%APPDATA%\ConMgr\config\connections.json` |
+| macOS   | `~/Library/Application Support/ConnMgr/connections.json` |
+| Linux   | `~/.config/connmgr/connections.json` |
+| Windows | `%APPDATA%\ConnMgr\config\connections.json` |
 
 Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüsselt. Die Einträge bilden einen Baum aus Ordnern, Verbindungen und Zugangsdaten (Format 2; Dateien im alten Format 1 werden beim Öffnen automatisch übernommen):
 
@@ -68,7 +72,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 
 ## Bedienung
 
-- **Baum** links: **Ein Klick auf eine Verbindung verbindet** – ist schon ein Tab offen, wechselt ConMgr dorthin („Weitere Sitzung öffnen“ im Kontextmenü öffnet eine zusätzliche). **Rechtsklick** öffnet das Kontextmenü mit Eigenschaften, Duplizieren, Exportieren und Löschen. Ein Klick auf Ordner oder Zugangsdaten markiert nur; der **Eigenschaften-Tab** öffnet sich ausschließlich über „📝 Eigenschaften“ (oder beim Anlegen) und lässt sich mit ✖ schließen. Ordner per Doppelklick auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene).
+- **Baum** links: **Ein Klick auf eine Verbindung verbindet** – ist schon ein Tab offen, wechselt ConnMgr dorthin („Weitere Sitzung öffnen“ im Kontextmenü öffnet eine zusätzliche). **Rechtsklick** öffnet das Kontextmenü mit Eigenschaften, Duplizieren, Exportieren und Löschen. Ein Klick auf Ordner oder Zugangsdaten markiert nur; der **Eigenschaften-Tab** öffnet sich ausschließlich über „📝 Eigenschaften“ (oder beim Anlegen) und lässt sich mit ✖ schließen. Ordner per Doppelklick auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene).
 - **⚡ Schnellverbindung** (Feld in der Werkzeugleiste, `⌘K` / `Strg+K`): Adresse eintippen und Enter – z. B. `rdp://server`, `ssh://admin@host:2222`, `vnc://host:5901`, `admin@host`, `host:3389`, `[::1]:22`. Ohne Schema entscheidet der Port (3389 = RDP, 5900–5999 = VNC, sonst SSH). Passwort (bei RDP auch Benutzer) fragt der Tab ab. **💾** im Tab speichert die Verbindung in den Baum (in den markierten Ordner); **▾** zeigt die letzten zehn Adressen (ohne Passwörter).
 - **📌 Fixieren / automatisch ausblenden:** Nicht fixiert bleibt nur eine schmale Leiste (»); fährt die Maus darüber, schwebt der Baum über dem Inhalt ein und verschwindet beim Verlassen wieder – die Sitzung behält ihre Größe. Die Einstellung wird gespeichert.
 - **Löschen** fragt in einem Dialog nach; **Entf** (Mac: ⌘⌫) löscht den markierten Eintrag.
@@ -82,7 +86,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 
 ## Sitzungen in Tabs
 
-Ein Doppelklick öffnet SSH, SFTP, RDP und VNC als Tab direkt in ConMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems.
+Ein Doppelklick öffnet SSH, SFTP, RDP und VNC als Tab direkt in ConnMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems.
 
 ### SSH-Terminal
 
@@ -94,9 +98,9 @@ Eingebautes Terminal (`xterm-256color`, 256 Farben/Truecolor). Markieren mit der
 3. Standardschlüssel `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`,
 4. Passwort, dann Keyboard-Interactive.
 
-Fehlt eine **Passphrase** oder ein Passwort – oder wird das gespeicherte abgelehnt –, fragt ConMgr im Tab nach. Akzeptiert der Server nur Schlüssel, gibt es eine klare Meldung statt einer Passwortabfrage.
+Fehlt eine **Passphrase** oder ein Passwort – oder wird das gespeicherte abgelehnt –, fragt ConnMgr im Tab nach. Akzeptiert der Server nur Schlüssel, gibt es eine klare Meldung statt einer Passwortabfrage.
 
-**Host-Keys** werden gegen `~/.ssh/known_hosts` geprüft (dieselbe Datei wie OpenSSH). Unbekannte Keys zeigt ConMgr mit Fingerabdruck zur Bestätigung an; **geänderte Keys werden immer abgelehnt**.
+**Host-Keys** werden gegen `~/.ssh/known_hosts` geprüft (dieselbe Datei wie OpenSSH). Unbekannte Keys zeigt ConnMgr mit Fingerabdruck zur Bestätigung an; **geänderte Keys werden immer abgelehnt**.
 
 ### SFTP-Browser
 
@@ -104,14 +108,14 @@ Für SFTP-Verbindungen per Doppelklick, für SSH-Verbindungen über „📂 SFTP
 
 ### RDP
 
-Über [IronRDP](https://github.com/Devolutions/IronRDP): TLS mit **NLA** (CredSSP/NTLM), Desktop in Tab-Größe (physische Pixel; auf Retina-Displays meldet ConMgr Windows die passende Skalierung, z. B. 200 %). Maus inkl. Rad, Tastatur: Text geht als Unicode an den Server und ist damit unabhängig vom Tastaturlayout; Sondertasten und Kürzel als Scancodes (unter macOS wird ⌘ zu Strg, also ⌘C/⌘X/⌘V wie gewohnt).
+Über [IronRDP](https://github.com/Devolutions/IronRDP): TLS mit **NLA** (CredSSP/NTLM), Desktop in Tab-Größe (physische Pixel; auf Retina-Displays meldet ConnMgr Windows die passende Skalierung, z. B. 200 %). Maus inkl. Rad, Tastatur: Text geht als Unicode an den Server und ist damit unabhängig vom Tastaturlayout; Sondertasten und Kürzel als Scancodes (unter macOS wird ⌘ zu Strg, also ⌘C/⌘X/⌘V wie gewohnt).
 
 - **Größe:** Ändert sich der Tab (Fenster, Seitenleiste), passt sich der Windows-Desktop nach einer halben Sekunde Ruhe an (Display-Control-Kanal).
 - **Zwischenablage:** Text in beide Richtungen. In Windows Kopiertes landet in der Mac-Zwischenablage; auf dem Mac Kopiertes steht in Windows zum Einfügen bereit. Hinweis: Wie bei mstsc sieht der Server dabei alles, was du lokal kopierst, solange der Tab verbunden ist.
 
 Anmeldung: Benutzer als `benutzer`, `DOMÄNE\benutzer` oder `benutzer@domäne`; fehlen Benutzer oder Passwort, fragt der Tab nach.
 
-**Zertifikate:** RDP-Server haben meist selbst signierte Zertifikate. Lässt sich das Zertifikat nicht prüfen, zeigt ConMgr den SHA-256-Fingerabdruck zur Bestätigung und merkt ihn sich in `rdp_certificates.json` (neben der Verbindungsdatei). **Ein geändertes Zertifikat wird abgelehnt** – Eintrag dort löschen, wenn der Server bewusst ein neues bekommen hat.
+**Zertifikate:** RDP-Server haben meist selbst signierte Zertifikate. Lässt sich das Zertifikat nicht prüfen, zeigt ConnMgr den SHA-256-Fingerabdruck zur Bestätigung und merkt ihn sich in `rdp_certificates.json` (neben der Verbindungsdatei). **Ein geändertes Zertifikat wird abgelehnt** – Eintrag dort löschen, wenn der Server bewusst ein neues bekommen hat.
 
 Noch nicht: Kerberos, Smartcards, Sound, Laufwerksumleitung, Dateien/Bilder in der Zwischenablage, RD-Gateway.
 
@@ -128,7 +132,7 @@ Beendete Sitzungen lassen sich im Tab neu verbinden. **Sperren trennt alle Sitzu
 Die mit `#[ignore]` markierten Tests laufen gegen einen echten sshd. `HOME` muss auf ein Testverzeichnis zeigen (Schlüssel in `.ssh`, `known_hosts` wird dort angelegt; für den Passphrase-Test zusätzlich `enc_key` mit Passphrase `geheim123`):
 
 ```bash
-CONMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored --test-threads=1
+CONNMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored --test-threads=1
 ```
 
 Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener Server bis einschließlich TLS) laufen bei `cargo test` immer.
@@ -142,7 +146,7 @@ Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener
 
 ## Externe Clients
 
-Über „Extern“ (bei RDP immer) startet ConMgr die Clients des Betriebssystems:
+Über „Extern“ (bei RDP immer) startet ConnMgr die Clients des Betriebssystems:
 
 | Typ  | macOS | Linux | Windows |
 |------|-------|-------|---------|
@@ -151,8 +155,8 @@ Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener
 | RDP  | `.rdp`-Datei → „Windows App“ | `xfreerdp3`/`xfreerdp` (mit Passwort) | `mstsc` (Passwort via `cmdkey`) |
 | VNC  | Bildschirmfreigabe (`vnc://`) | `vncviewer` | `vncviewer` (TigerVNC) |
 
-**SSH/SFTP:** ConMgr übergibt das Passwort über `SSH_ASKPASS` (OpenSSH ≥ 8.4). Die App vergibt pro Verbindung ein einmaliges, 2 Minuten gültiges Token und liefert das Passwort über einen nur lokal erreichbaren Socket (127.0.0.1) an ssh – es steht weder auf der Kommandozeile noch in einer Datei. Andere Rückfragen (Host-Key bestätigen, Schlüssel-Passphrase, erneute Eingabe nach falschem Passwort) erscheinen ganz normal im Terminal.
+**SSH/SFTP:** ConnMgr übergibt das Passwort über `SSH_ASKPASS` (OpenSSH ≥ 8.4). Die App vergibt pro Verbindung ein einmaliges, 2 Minuten gültiges Token und liefert das Passwort über einen nur lokal erreichbaren Socket (127.0.0.1) an ssh – es steht weder auf der Kommandozeile noch in einer Datei. Andere Rückfragen (Host-Key bestätigen, Schlüssel-Passphrase, erneute Eingabe nach falschem Passwort) erscheinen ganz normal im Terminal.
 
-Wo der Client kein Passwort übernehmen kann (VNC, RDP unter macOS), kopiert ConMgr es beim Verbinden in die Zwischenablage und löscht es dort nach 30 Sekunden wieder.
+Wo der Client kein Passwort übernehmen kann (VNC, RDP unter macOS), kopiert ConnMgr es beim Verbinden in die Zwischenablage und löscht es dort nach 30 Sekunden wieder.
 
 Hinweis Windows/RDP: `cmdkey` legt die Anmeldedaten dauerhaft in der Windows-Anmeldeinformationsverwaltung ab.
