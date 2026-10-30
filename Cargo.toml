@@ -51,3 +51,11 @@ strip = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Test-Server für die TLS-Zertifikatsprüfung im RDP-Test (gleiche Versionen wie über ironrdp-tls).
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+
+# Entsperren mit Touch ID (macOS): LocalAuthentication und Schlüsselbund.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "=0.3.2", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
+security-framework = "=3.7.0"

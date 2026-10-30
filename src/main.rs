@@ -4,6 +4,7 @@
 mod i18n;
 mod app;
 mod askpass;
+mod biometric;
 mod crypto;
 mod dialogs;
 mod launcher;

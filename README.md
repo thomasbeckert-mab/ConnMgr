@@ -72,7 +72,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 
 ## Bedienung
 
-- **Baum** links: **Ein Klick auf eine Verbindung verbindet** – ist schon ein Tab offen, wechselt ConnMgr dorthin („Weitere Sitzung öffnen“ im Kontextmenü öffnet eine zusätzliche). **Rechtsklick** öffnet das Kontextmenü mit Eigenschaften, Duplizieren, Exportieren und Löschen. Ein Klick auf Ordner oder Zugangsdaten markiert nur; der **Eigenschaften-Tab** öffnet sich ausschließlich über „📝 Eigenschaften“ (oder beim Anlegen) und lässt sich mit ✖ schließen. Ordner per Doppelklick auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene).
+- **Baum** links: **Doppelklick auf eine Verbindung verbindet** (ein Klick markiert) – ist schon ein Tab offen, wechselt ConnMgr dorthin („Weitere Sitzung öffnen“ im Kontextmenü öffnet eine zusätzliche). **Rechtsklick** öffnet das Kontextmenü mit Eigenschaften, Duplizieren, Exportieren und Löschen. Ein Klick auf Ordner oder Zugangsdaten markiert nur; der **Eigenschaften-Tab** öffnet sich ausschließlich über „📝 Eigenschaften“ (oder beim Anlegen) und lässt sich mit ✖ schließen. Ordner per Doppelklick auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene).
 - **⚡ Schnellverbindung** (Feld in der Werkzeugleiste, `⌘K` / `Strg+K`): Adresse eintippen und Enter – z. B. `rdp://server`, `ssh://admin@host:2222`, `vnc://host:5901`, `admin@host`, `host:3389`, `[::1]:22`. Ohne Schema entscheidet der Port (3389 = RDP, 5900–5999 = VNC, sonst SSH). Passwort (bei RDP auch Benutzer) fragt der Tab ab. **💾** im Tab speichert die Verbindung in den Baum (in den markierten Ordner); **▾** zeigt die letzten zehn Adressen (ohne Passwörter).
 - **📌 Fixieren / automatisch ausblenden:** Nicht fixiert bleibt nur eine schmale Leiste (»); fährt die Maus darüber, schwebt der Baum über dem Inhalt ein und verschwindet beim Verlassen wieder – die Sitzung behält ihre Größe. Die Einstellung wird gespeichert.
 - **Löschen** fragt in einem Dialog nach; **Entf** (Mac: ⌘⌫) löscht den markierten Eintrag.
@@ -82,7 +82,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 - **Duplizieren** kopiert Einträge und ganze Ordner; Verweise auf mitkopierte Zugangsdaten zeigen danach auf die Kopien.
 - **Menü ☰:** *Master-Passwort ändern* (neues Salt, alle Geheimnisse umverschlüsselt), *Alles exportieren*, *Importieren*. Einzelne Einträge/Ordner exportiert das Kontextmenü. Exporte sind eigene, mit einem **eigenen Passwort** geschützte Dateien – gut zum Weitergeben. Importe landen in einem neuen Ordner „Import …“.
 - `⌘S` / `Strg+S` speichert den offenen Eintrag.
-- **⚙ Einstellungen** (Menü ☰): Sprache (wie System, Deutsch, English) und Darstellung (wie System, Hell, Dunkel). Änderungen wirken sofort und werden in der Verbindungsdatei gespeichert – auch der Sperrbildschirm erscheint danach in Sprache und Design.
+- **⚙ Einstellungen** (Menü ☰): Sprache (wie System, Deutsch, English), Darstellung (wie System, Hell, Dunkel) und **Entsperren mit Touch ID**. Änderungen wirken sofort und werden in der Verbindungsdatei gespeichert – auch der Sperrbildschirm erscheint danach in Sprache und Design.
 
 ## Sitzungen in Tabs
 
@@ -146,6 +146,14 @@ CONNMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored -
 ```
 
 Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener Server bis einschließlich TLS) laufen bei `cargo test` immer.
+
+## Entsperren mit Touch ID (macOS)
+
+In den Einstellungen einschalten; beim nächsten Start fragt ConnMgr nach dem Fingerabdruck (nach manuellem Sperren per Knopf 👆). Das Master-Passwort funktioniert immer weiter, „Passwort eingeben“ in der Touch-ID-Abfrage führt dorthin.
+
+- Im **Anmelde-Schlüsselbund** liegt der Schlüssel der Verbindungsdatei (nicht das Master-Passwort), nur für ConnMgr ohne Rückfrage lesbar.
+- **Einschränkung:** Einträge, bei denen macOS selbst den Fingerabdruck erzwingt, sind Apps mit Apple-Developer-ID vorbehalten (sonst Fehler -34018). Hier erzwingt ConnMgr die Abfrage; ein Schadprogramm, das bereits unter deinem Benutzer läuft und die Signatur von ConnMgr fälscht, käme ohne Fingerabdruck an den Schlüssel.
+- Ändert sich das Master-Passwort, wird der gespeicherte Schlüssel mitgezogen; passt er nicht mehr (z. B. Datei woanders geändert), verwirft ConnMgr ihn und verlangt das Passwort.
 
 ## Verschlüsselung
 

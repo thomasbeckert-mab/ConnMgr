@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -6,6 +7,7 @@ use eframe::egui::{self, Color32, RichText, Sense};
 use zeroize::Zeroizing;
 
 use crate::askpass;
+use crate::biometric;
 use crate::crypto::Vault;
 use crate::launcher;
 use crate::model::{self, Connection, Credential, CredentialSource, DisplayProtocol, Folder, Node, Protocol, SecretField, Target};
@@ -50,7 +52,12 @@ struct LockScreen {
     confirm: Zeroizing<String>,
     error: Option<String>,
     focused: bool,
+    /// Touch-ID-Abfrage läuft in einem eigenen Thread; das Ergebnis landet hier.
+    biometric: Option<BiometricSlot>,
+    biometric_started: bool,
 }
+
+type BiometricSlot = Arc<std::sync::Mutex<Option<Result<Zeroizing<Vec<u8>>, Option<String>>>>>;
 
 struct Session {
     vault: Vault,
@@ -64,6 +71,8 @@ struct Session {
     tree_hide_at: Option<Instant>,
     /// Eingabe im Schnellverbindungsfeld.
     quick_input: String,
+    /// Touch ID eingerichtet (für den Schalter in den Einstellungen).
+    biometric_available: bool,
     /// Offene SSH-Sitzungen; beim Sperren werden sie mit der Session getrennt.
     tabs: Vec<Tab>,
     /// `None` = Eigenschaften-Tab.
@@ -325,6 +334,9 @@ enum Action {
     /// Schnellverbindung des Tabs als Eintrag im Baum speichern.
     SaveAdhoc(usize),
     ToggleTreePin,
+    /// Entsperren mit dem per Touch ID freigegebenen Schlüssel.
+    BiometricUnlock(Zeroizing<Vec<u8>>),
+    SetBiometric(bool),
     /// `None` = Sprache des Betriebssystems.
     SetLanguage(Option<Language>),
     SetTheme(Theme),
@@ -363,8 +375,10 @@ impl ConnMgrApp {
     fn handle(&mut self, ctx: &egui::Context, action: Action) {
         let result = match action {
             Action::Unlock => self.unlock(),
+            Action::BiometricUnlock(key) => self.unlock_with_key(&key),
             Action::Lock => {
-                self.state = State::Locked(LockScreen::default());
+                // Nach bewusstem Sperren Touch ID nicht sofort anbieten, nur per Knopf.
+                self.state = State::Locked(LockScreen { biometric_started: true, ..LockScreen::default() });
                 self.status = t!("Gesperrt", "Locked");
                 Ok(())
             }
@@ -422,23 +436,7 @@ impl ConnMgrApp {
             })
         };
         match outcome {
-            Ok((store, vault)) => {
-                self.status = t!("Entsperrt", "Unlocked");
-                self.state = State::Unlocked(Box::new(Session {
-                    vault,
-                    store,
-                    filter: String::new(),
-                    favorites_only: false,
-                    selected: None,
-                    editor: None,
-                    tree_overlay: false,
-                    tree_hide_at: None,
-                    quick_input: String::new(),
-                    tabs: Vec::new(),
-                    active_tab: None,
-                    dialog: None,
-                }));
-            }
+            Ok((store, vault)) => self.enter_session(store, vault),
             Err(e) => {
                 lock.error = Some(e.to_string());
                 lock.master.clear();
@@ -447,6 +445,48 @@ impl ConnMgrApp {
             }
         }
         Ok(())
+    }
+
+    /// Touch ID hat den Schlüssel freigegeben: Datei damit öffnen. Passt er nicht mehr
+    /// (Master-Passwort anderswo geändert), wird er verworfen und das Passwort verlangt.
+    fn unlock_with_key(&mut self, key: &[u8]) -> Result<()> {
+        let store = StoreFile::load(&self.path)?;
+        match store.unlock_with_key(key) {
+            Ok(vault) => self.enter_session(store, vault),
+            Err(e) => {
+                biometric::delete_key(&self.path);
+                let mut store = store;
+                store.settings.biometric_unlock = false;
+                store.save(&self.path)?;
+                self.settings = store.settings;
+                if let State::Locked(lock) = &mut self.state {
+                    lock.error = Some(t!(
+                        "{e}. Bitte Master-Passwort eingeben und Touch ID in den Einstellungen neu einschalten.",
+                        "{e}. Please enter the master password and re-enable Touch ID in the settings."
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn enter_session(&mut self, store: StoreFile, vault: Vault) {
+        self.status = t!("Entsperrt", "Unlocked");
+        self.state = State::Unlocked(Box::new(Session {
+            vault,
+            store,
+            filter: String::new(),
+            favorites_only: false,
+            selected: None,
+            editor: None,
+            tree_overlay: false,
+            tree_hide_at: None,
+            quick_input: String::new(),
+            biometric_available: biometric::available(),
+            tabs: Vec::new(),
+            active_tab: None,
+            dialog: None,
+        }));
     }
 
     fn session(&self) -> Result<&Session> {
@@ -761,6 +801,22 @@ impl Session {
                 }
                 Ok(None)
             }
+            Action::SetBiometric(enabled) => {
+                if enabled {
+                    biometric::store_key(path, self.vault.key_bytes()).map_err(|e| {
+                        anyhow!(t!("Schlüssel konnte nicht im Schlüsselbund abgelegt werden: {e}", "Could not store the key in the keychain: {e}"))
+                    })?;
+                } else {
+                    biometric::delete_key(path);
+                }
+                self.store.settings.biometric_unlock = enabled;
+                self.store.save(path)?;
+                Ok(Some(if enabled {
+                    t!("Touch ID eingeschaltet", "Touch ID enabled")
+                } else {
+                    t!("Touch ID ausgeschaltet", "Touch ID disabled")
+                }))
+            }
             Action::SetLanguage(language) => {
                 self.store.settings.language = language;
                 self.store.save(path)?;
@@ -834,6 +890,7 @@ impl Session {
             }
             Action::SubmitDialog => self.submit_dialog(path),
             Action::Unlock
+            | Action::BiometricUnlock(_)
             | Action::Lock
             | Action::Connect(_)
             | Action::ConnectExternal(_)
@@ -1008,6 +1065,10 @@ impl Session {
                     let mut store = self.store.clone();
                     store.change_master(&self.vault, new).and_then(|vault| {
                         store.save(path)?;
+                        // Touch ID soll mit dem neuen Schlüssel weiter funktionieren.
+                        if store.settings.biometric_unlock {
+                            biometric::store_key(path, vault.key_bytes()).map_err(|e| anyhow!(e))?;
+                        }
                         self.store = store;
                         self.vault = vault;
                         Ok(t!("Master-Passwort geändert", "Master password changed"))
@@ -1094,7 +1155,11 @@ impl eframe::App for ConnMgrApp {
         self.apply_settings(ctx);
         self.refresh_status();
         let action = match &mut self.state {
-            State::Locked(lock) => lock_ui(ctx, lock, !self.path.exists(), &self.path),
+            State::Locked(lock) => {
+                let new_file = !self.path.exists();
+                let biometric = !new_file && self.settings.biometric_unlock && biometric::available();
+                lock_ui(ctx, lock, new_file, biometric, &self.path)
+            }
             State::Unlocked(session) => session_ui(ctx, session, &self.status, &self.path),
         };
         if let Some(action) = action {
@@ -1105,8 +1170,30 @@ impl eframe::App for ConnMgrApp {
 
 // ---------------------------------------------------------------- Sperrbildschirm
 
-fn lock_ui(ctx: &egui::Context, lock: &mut LockScreen, new_file: bool, path: &Path) -> Option<Action> {
+fn lock_ui(ctx: &egui::Context, lock: &mut LockScreen, new_file: bool, biometric: bool, path: &Path) -> Option<Action> {
     let mut action = None;
+    // Touch ID beim ersten Anzeigen automatisch anbieten; die Abfrage blockiert und läuft daher nebenher.
+    if biometric && !lock.biometric_started {
+        lock.biometric_started = true;
+        let slot: BiometricSlot = Arc::default();
+        let (result, file, ctx) = (Arc::clone(&slot), path.to_owned(), ctx.clone());
+        std::thread::spawn(move || {
+            let outcome = biometric::unlock(&file);
+            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            ctx.request_repaint();
+        });
+        lock.biometric = Some(slot);
+    }
+    let finished = lock.biometric.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(outcome) = finished {
+        lock.biometric = None;
+        match outcome {
+            Ok(key) => action = Some(Action::BiometricUnlock(key)),
+            Err(Some(message)) => lock.error = Some(message),
+            // Abgebrochen oder „Passwort eingeben“: einfach das Passwortfeld nutzen.
+            Err(None) => {}
+        }
+    }
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
@@ -1133,6 +1220,18 @@ fn lock_ui(ctx: &egui::Context, lock: &mut LockScreen, new_file: bool, path: &Pa
             ui.add_space(8.0);
             if ui.button(if new_file { ts!("Anlegen", "Create") } else { ts!("Entsperren", "Unlock") }).clicked() || submit {
                 action = Some(Action::Unlock);
+            }
+            if biometric {
+                ui.add_space(4.0);
+                if lock.biometric.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 160.0).max(0.0) / 2.0);
+                        ui.spinner();
+                        ui.label(ts!("Warte auf Touch ID …", "Waiting for Touch ID …"));
+                    });
+                } else if ui.button(ts!("👆 Mit Touch ID entsperren", "👆 Unlock with Touch ID")).clicked() {
+                    lock.biometric_started = false;
+                }
             }
             if let Some(err) = &lock.error {
                 ui.add_space(8.0);
@@ -1257,7 +1356,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
     });
 
     match &mut s.dialog {
-        Some(Dialog::Settings) => settings_ui(ctx, &s.store.settings, &mut action),
+        Some(Dialog::Settings) => settings_ui(ctx, &s.store.settings, s.biometric_available, &mut action),
         Some(dialog) => dialog_ui(ctx, dialog, &mut action),
         None => {}
     }
@@ -1276,7 +1375,7 @@ impl Dialog {
 }
 
 /// Einstellungen wirken sofort und werden gespeichert.
-fn settings_ui(ctx: &egui::Context, settings: &Settings, action: &mut Option<Action>) {
+fn settings_ui(ctx: &egui::Context, settings: &Settings, biometric_available: bool, action: &mut Option<Action>) {
     let mut open = true;
     egui::Window::new(ts!("Einstellungen", "Settings"))
         .collapsible(false)
@@ -1311,6 +1410,24 @@ fn settings_ui(ctx: &egui::Context, settings: &Settings, action: &mut Option<Act
                         if ui.radio(settings.theme == value, label).clicked() {
                             *action = Some(Action::SetTheme(value));
                         }
+                    }
+                });
+                ui.end_row();
+
+                ui.label(ts!("Entsperren", "Unlock"));
+                ui.vertical(|ui| {
+                    let mut enabled = settings.biometric_unlock;
+                    let toggle = ui.add_enabled(biometric_available, egui::Checkbox::new(&mut enabled, ts!("👆 Mit Touch ID", "👆 With Touch ID")));
+                    if toggle.changed() {
+                        *action = Some(Action::SetBiometric(enabled));
+                    }
+                    if !biometric_available {
+                        ui.weak(ts!("Touch ID ist auf diesem Gerät nicht eingerichtet.", "Touch ID is not set up on this device."));
+                    } else {
+                        ui.weak(ts!(
+                            "Der Schlüssel liegt im Anmelde-Schlüsselbund; ConnMgr gibt ihn nur nach Fingerabdruck frei.",
+                            "The key is kept in the login keychain; ConnMgr releases it only after a fingerprint."
+                        ));
                     }
                 });
                 ui.end_row();
@@ -1460,8 +1577,8 @@ fn empty_background(ui: &mut egui::Ui) {
         ui.heading("ConnMgr");
         ui.add_space(6.0);
         ui.weak(ts!(
-            "Klick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.",
-            "Click a connection to connect — right-click opens the menu (properties, delete …), drag to move."
+            "Doppelklick auf eine Verbindung verbindet — Rechtsklick öffnet das Menü (Eigenschaften, Löschen …), Ziehen verschiebt.",
+            "Double-click a connection to connect — right-click opens the menu (properties, delete …), drag to move."
         ));
     });
 }
@@ -1671,16 +1788,19 @@ impl TreeView<'_> {
             .inner;
 
         let label = match node {
-            Node::Connection(c) => label.on_hover_text(t!("{}  {} — Klick verbindet", "{}  {} — click to connect", c.protocol.label(), c.host_port())),
+            Node::Connection(c) => label.on_hover_text(t!("{}  {} — Doppelklick verbindet", "{}  {} — double-click to connect", c.protocol.label(), c.host_port())),
             _ => label,
         };
 
-        // Verbindungen: ein Klick verbindet (bzw. wechselt zum offenen Tab). Bearbeiten über das Kontextmenü.
-        match node {
-            Node::Connection(_) if label.clicked() => *action = Some(Action::Connect(id.to_owned())),
-            Node::Folder(_) if label.double_clicked() => *action = Some(Action::ToggleExpanded(id.to_owned())),
-            Node::Folder(_) | Node::Credential(_) if label.clicked() => *action = Some(Action::Select(id.to_owned())),
-            _ => {}
+        // Doppelklick verbindet (bzw. wechselt zum offenen Tab) oder klappt Ordner auf; ein Klick markiert.
+        if label.double_clicked() {
+            match node {
+                Node::Connection(_) => *action = Some(Action::Connect(id.to_owned())),
+                Node::Folder(_) => *action = Some(Action::ToggleExpanded(id.to_owned())),
+                Node::Credential(_) => {}
+            }
+        } else if label.clicked() {
+            *action = Some(Action::Select(id.to_owned()));
         }
 
         // Ziehen & Ablegen: auf einen Ordner = hinein, auf einen Eintrag = davor.
@@ -2099,6 +2219,7 @@ mod tests {
             tree_overlay: false,
             tree_hide_at: None,
             quick_input: String::new(),
+            biometric_available: false,
             tabs: Vec::new(),
             active_tab: None,
             dialog: None,
@@ -2179,6 +2300,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("„{name}“ nicht gefunden in {:?}", self.widgets.iter().map(|w| &w.0).collect::<Vec<_>>()))
                 .1
                 .center()
+        }
+
+        /// Zwei Klicks ohne Pause; liefert die Aktion des zweiten.
+        fn double_click(&mut self, s: &mut Session, name: &str) -> Option<String> {
+            // egui wertet drei Klicks binnen 0,6 s als Dreifachklick; vorherige Klicks abwarten.
+            std::thread::sleep(Duration::from_millis(700));
+            self.frame(s);
+            let pos = self.find(name);
+            let (button, modifiers) = (egui::PointerButton::Primary, egui::Modifiers::NONE);
+            self.events.push(egui::Event::PointerMoved(pos));
+            let mut last = None;
+            for _ in 0..2 {
+                self.events.push(egui::Event::PointerButton { pos, button, pressed: true, modifiers });
+                self.frame(s);
+                self.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers });
+                last = self.frame(s);
+            }
+            last
         }
 
         /// Klickt (Drücken und Loslassen in zwei Bildern) und liefert die ausgelöste Aktion.
@@ -2267,12 +2406,14 @@ mod tests {
     }
 
     #[test]
-    fn single_click_connects_and_folder_click_selects() {
+    fn click_marks_and_double_click_connects() {
         let mut s = session();
         let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
         ui.frame(&mut s);
         ui.frame(&mut s);
-        assert_eq!(ui.click(&mut s, "lonely", egui::PointerButton::Primary).as_deref(), Some("Connect"));
+        assert_eq!(ui.click(&mut s, "lonely", egui::PointerButton::Primary).as_deref(), Some("Select"));
+        assert!(s.tabs.is_empty());
+        assert_eq!(ui.double_click(&mut s, "lonely").as_deref(), Some("Connect"));
         assert_eq!(ui.click(&mut s, "Production", egui::PointerButton::Primary).as_deref(), Some("Select"));
     }
 
@@ -2320,7 +2461,7 @@ mod tests {
         crate::i18n::tests::force_english(Some(true));
         ui.frame(&mut s);
         ui.frame(&mut s);
-        assert!(ui.has("🔒 Lock") && ui.has("Appearance") && ui.has("Click a connection to connect"), "{:?}", ui.widgets.iter().map(|w| &w.0).collect::<Vec<_>>());
+        assert!(ui.has("🔒 Lock") && ui.has("Appearance") && ui.has("Double-click a connection to connect"), "{:?}", ui.widgets.iter().map(|w| &w.0).collect::<Vec<_>>());
         crate::i18n::tests::force_english(Some(false));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2338,7 +2479,7 @@ mod tests {
         for _ in 0..3 {
             ui.frame(&mut s);
         }
-        assert!(ui.has("ConnMgr") && ui.has("Klick auf eine Verbindung verbindet"), "Hintergrund mit Name und Hinweis");
+        assert!(ui.has("ConnMgr") && ui.has("Doppelklick auf eine Verbindung verbindet"), "Hintergrund mit Name und Hinweis");
     }
 
     #[test]

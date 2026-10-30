@@ -59,6 +59,16 @@ impl Vault {
         Ok(Self { key })
     }
 
+    /// Für das Entsperren per Touch ID: Schlüssel im Schlüsselbund ablegen und wiederherstellen.
+    pub fn key_bytes(&self) -> &[u8] {
+        &self.key[..]
+    }
+
+    pub fn from_key(bytes: &[u8]) -> Result<Self> {
+        let key: [u8; 32] = bytes.try_into().map_err(|_| anyhow!(t!("Ungültige Schlüssellänge", "Invalid key length")))?;
+        Ok(Self { key: Zeroizing::new(key) })
+    }
+
     fn cipher(&self) -> Aes256Gcm {
         Aes256Gcm::new_from_slice(&self.key[..]).expect("Schlüssel ist 32 Byte lang")
     }

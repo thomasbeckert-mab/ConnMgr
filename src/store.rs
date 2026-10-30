@@ -40,6 +40,9 @@ pub struct Settings {
     pub language: Option<Language>,
     #[serde(default)]
     pub theme: Theme,
+    /// Entsperren per Touch ID; der Schlüssel liegt dann im Anmelde-Schlüsselbund.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub biometric_unlock: bool,
     /// Letzte Schnellverbindungen (nur Adressen, keine Passwörter), neueste zuerst.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quick_history: Vec<String>,
@@ -47,7 +50,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { tree_pinned: true, language: None, theme: Theme::System, quick_history: Vec::new() }
+        Self { tree_pinned: true, language: None, theme: Theme::System, biometric_unlock: false, quick_history: Vec::new() }
     }
 }
 
@@ -118,9 +121,19 @@ impl StoreFile {
 
     pub fn unlock(&self, master: &str) -> Result<Vault> {
         let vault = Vault::derive(master, &self.kdf)?;
+        self.verify(vault).map_err(|_| anyhow!(t!("Falsches Master-Passwort", "Wrong master password")))
+    }
+
+    /// Entsperren mit einem gespeicherten Schlüssel (Touch ID); geprüft wie beim Passwort.
+    pub fn unlock_with_key(&self, key: &[u8]) -> Result<Vault> {
+        self.verify(Vault::from_key(key)?)
+            .map_err(|_| anyhow!(t!("Der gespeicherte Schlüssel passt nicht mehr zur Datei", "The stored key no longer matches the file")))
+    }
+
+    fn verify(&self, vault: Vault) -> Result<Vault> {
         match vault.decrypt_str(&self.verifier, VERIFIER_AAD) {
             Ok(pt) if pt.as_str() == VERIFIER_PLAINTEXT => Ok(vault),
-            _ => Err(anyhow!(t!("Falsches Master-Passwort", "Wrong master password"))),
+            _ => bail!("verifier"),
         }
     }
 
@@ -465,6 +478,16 @@ mod tests {
         migrate_legacy_dir(&old, &new);
         assert_eq!(fs::read_to_string(new.join("connections.json")).unwrap(), "{}");
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn unlock_with_stored_key() {
+        let (store, vault) = StoreFile::create("master").unwrap();
+        let key = vault.key_bytes().to_vec();
+        assert!(store.unlock_with_key(&key).is_ok());
+        let (_, other) = StoreFile::create("anders").unwrap();
+        assert!(store.unlock_with_key(other.key_bytes()).is_err(), "fremder Schlüssel");
+        assert!(store.unlock_with_key(&key[..16]).is_err(), "falsche Länge");
     }
 
     #[test]
