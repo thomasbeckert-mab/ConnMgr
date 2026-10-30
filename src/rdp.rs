@@ -1,6 +1,9 @@
 //! Eingebettete RDP-Sitzung über IronRDP: TLS, NLA (CredSSP/NTLM), Bild als egui-Textur,
 //! Maus und Tastatur als Fast-Path-Eingaben.
 //!
+//! Größenänderungen laufen über den Display-Control-Kanal (MS-RDPEDISP) samt
+//! Deaktivierung/Reaktivierung, Text in der Zwischenablage über CLIPRDR in beide Richtungen.
+//!
 //! TLS-Zertifikate werden wie SSH-Host-Keys behandelt: Lässt sich ein Zertifikat nicht
 //! prüfen (bei RDP-Servern meist selbst signiert), fragt ConMgr nach und merkt sich den
 //! Fingerabdruck; ein geänderter Fingerabdruck wird abgelehnt.
@@ -9,13 +12,23 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use eframe::egui::{self, Color32, Event, EventFilter, Key, Modifiers, PointerButton, Rect, Sense, TextureOptions};
 use ironrdp_async::{FramedWrite as _, NetworkClient};
+use ironrdp_cliprdr::backend::CliprdrBackend;
+use ironrdp_cliprdr::pdu::{
+    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest, FileContentsResponse,
+    FormatDataRequest, FormatDataResponse, LockDataId,
+};
+use ironrdp_cliprdr::{CliprdrClient, CliprdrSvcMessages};
+use ironrdp_connector::connection_activation::{ConnectionActivationSequence, ConnectionActivationState};
 use ironrdp_connector::sspi::generator::NetworkRequest;
 use ironrdp_connector::{general_err, ClientConnector, ConnectorResult, Credentials, DesktopSize, ServerName};
+use ironrdp_core::WriteBuf;
+use ironrdp_displaycontrol::client::DisplayControlClient;
+use ironrdp_dvc::DrdynvcClient;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{Database, MouseButton, MousePosition, Operation, Scancode, WheelRotations};
 use ironrdp_pdu::gcc::{ConnectionType, KeyboardType};
@@ -31,7 +44,10 @@ use crate::dialogs::{ConnOverlay, TabResponse};
 use crate::ssh::{connect_error, Conn, Status};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_PASTE_CHARS: usize = 10_000;
+/// Ruhezeit nach dem letzten Größenwechsel, bevor Windows die neue Auflösung bekommt.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// Abstand, in dem die Zwischenablage des Macs auf neuen Text geprüft wird.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(700);
 
 pub struct RdpParams {
     pub host: String,
@@ -48,12 +64,17 @@ pub struct Framebuffer {
     pub height: usize,
     pub pixels: Vec<u8>,
     pub dirty: bool,
+    /// Text aus der Windows-Zwischenablage, noch nicht in die lokale übernommen.
+    pub clipboard: Option<String>,
 }
 
 enum Input {
     /// Erste Größe der Ansicht in Pixeln samt Skalierung; erst dann wird verbunden.
     Start { width: u16, height: u16, scale_percent: u32 },
+    Resize { width: u16, height: u16, scale_percent: u32 },
     Operations(Vec<Operation>),
+    /// Neuer Text in der lokalen Zwischenablage.
+    LocalClipboard(String),
 }
 
 pub struct RdpSession {
@@ -99,6 +120,97 @@ impl Drop for RdpSession {
     }
 }
 
+/// Was der CLIPRDR-Kanal während der Verarbeitung meldet; die Sitzungsschleife reagiert darauf,
+/// weil die Rückruffunktionen selbst nichts senden können.
+#[derive(Debug, PartialEq)]
+enum ClipEvent {
+    /// Kanal bereit bzw. Server fragt nach unseren Formaten.
+    Ready,
+    /// In Windows wurde Text kopiert.
+    RemoteHasText,
+    /// Windows will unseren Inhalt in diesem Format.
+    Requested(ClipboardFormatId),
+    RemoteText(String),
+}
+
+#[derive(Debug)]
+struct ClipBackend {
+    events: Arc<Mutex<Vec<ClipEvent>>>,
+}
+
+ironrdp_core::impl_as_any!(ClipBackend);
+
+impl ClipBackend {
+    fn push(&self, event: ClipEvent) {
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+    }
+}
+
+/// Nur Text; Dateien und Bilder werden nicht angeboten und nicht angefordert.
+impl CliprdrBackend for ClipBackend {
+    fn temporary_directory(&self) -> &str {
+        ".cliprdr"
+    }
+
+    fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
+        ClipboardGeneralCapabilityFlags::empty()
+    }
+
+    fn on_ready(&mut self) {
+        self.push(ClipEvent::Ready);
+    }
+
+    fn on_request_format_list(&mut self) {
+        self.push(ClipEvent::Ready);
+    }
+
+    fn on_process_negotiated_capabilities(&mut self, _capabilities: ClipboardGeneralCapabilityFlags) {}
+
+    fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
+        if available_formats.iter().any(|f| f.id() == ClipboardFormatId::CF_UNICODETEXT) {
+            self.push(ClipEvent::RemoteHasText);
+        }
+    }
+
+    fn on_format_data_request(&mut self, request: FormatDataRequest) {
+        self.push(ClipEvent::Requested(request.format));
+    }
+
+    fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
+        if !response.is_error() {
+            if let Ok(text) = response.to_unicode_string() {
+                self.push(ClipEvent::RemoteText(text.trim_end_matches('\0').to_owned()));
+            }
+        }
+    }
+
+    fn on_file_contents_request(&mut self, _request: FileContentsRequest) {}
+
+    fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {}
+
+    fn on_lock(&mut self, _data_id: LockDataId) {}
+
+    fn on_unlock(&mut self, _data_id: LockDataId) {}
+}
+
+/// Führt eine CLIPRDR-Operation aus und liefert den zu sendenden Rahmen.
+fn clipboard_frame(
+    stage: &mut ActiveStage,
+    op: impl FnOnce(&mut CliprdrClient) -> ironrdp_pdu::PduResult<CliprdrSvcMessages<ironrdp_cliprdr::Client>>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(cliprdr) = stage.get_svc_processor_mut::<CliprdrClient>() else { return Ok(None) };
+    if !cliprdr.is_ready() {
+        return Ok(None);
+    }
+    let messages = op(cliprdr).map_err(|e| anyhow!("Zwischenablage: {e}"))?;
+    Ok(Some(stage.process_svc_processor_messages(messages)?))
+}
+
+fn announce_text(cliprdr: &mut CliprdrClient, has_text: bool) -> ironrdp_pdu::PduResult<CliprdrSvcMessages<ironrdp_cliprdr::Client>> {
+    let formats = if has_text { vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)] } else { Vec::new() };
+    cliprdr.initiate_copy(&formats)
+}
+
 /// Ohne Kerberos braucht CredSSP (NTLM) keine Netzwerkanfragen an einen KDC.
 struct NoKdc;
 
@@ -118,7 +230,7 @@ async fn run(
     let (width, height, scale_percent) = loop {
         match input.recv().await {
             Some(Input::Start { width, height, scale_percent }) => break (width, height, scale_percent),
-            Some(Input::Operations(_)) => {}
+            Some(_) => {}
             None => return Ok("Verbindung getrennt".into()),
         }
     };
@@ -137,19 +249,14 @@ async fn run(
         None => (None, username.clone()),
     };
     let config = build_config(user, password.to_string(), domain, width, height, scale_percent);
+    let clip_events: Arc<Mutex<Vec<ClipEvent>>> = Arc::default();
 
-    let (result, framed) = connect(&params.host, params.port, config, conn).await?;
+    let (result, framed) = connect(&params.host, params.port, config.clone(), &clip_events, conn).await?;
     conn.set_status(Status::Connected);
 
     let size = result.desktop_size;
     let mut image = DecodedImage::new(PixelFormat::RgbA32, size.width, size.height);
-    {
-        let mut fb = framebuffer.lock().unwrap_or_else(|e| e.into_inner());
-        fb.width = size.width.into();
-        fb.height = size.height.into();
-        fb.pixels = image.data().to_vec();
-        fb.dirty = true;
-    }
+    publish_size(framebuffer, &image);
     let mut stage: ActiveStage = ActiveStageBuilder {
         static_channels: result.static_channels,
         user_channel_id: result.user_channel_id,
@@ -162,8 +269,11 @@ async fn run(
     }
     .build();
 
+    let (io_channel_id, user_channel_id) = (result.io_channel_id, result.user_channel_id);
     let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
     let mut database = Database::new();
+    let mut requested_size = (size.width, size.height, scale_percent);
+    let mut local_text: Option<String> = None;
     loop {
         let outputs = tokio::select! {
             pdu = reader.read_pdu() => {
@@ -178,6 +288,23 @@ async fn run(
                 Some(Input::Operations(ops)) => {
                     let events = database.apply(ops);
                     stage.process_fastpath_input(&mut image, &events)?
+                }
+                Some(Input::Resize { width, height, scale_percent }) => {
+                    // Windows verlangt eine gerade Breite zwischen 200 und 8192 Pixeln.
+                    let (width, height) = ((width & !1).clamp(200, 8192), height.clamp(200, 8192));
+                    requested_size = (width, height, scale_percent);
+                    // Ist der Kanal (noch) nicht verfügbar, bleibt die Größe, bis neu verbunden wird.
+                    if let Some(Ok(frame)) = stage.encode_resize(width.into(), height.into(), Some(scale_percent), None) {
+                        writer.write_all(&frame).await.context("Senden an den Server")?;
+                    }
+                    Vec::new()
+                }
+                Some(Input::LocalClipboard(text)) => {
+                    local_text = Some(text);
+                    if let Some(frame) = clipboard_frame(&mut stage, |c| announce_text(c, true))? {
+                        writer.write_all(&frame).await.context("Senden an den Server")?;
+                    }
+                    Vec::new()
                 }
                 Some(Input::Start { .. }) => Vec::new(),
                 None => {
@@ -201,11 +328,71 @@ async fn run(
                 ActiveStageOutput::GraphicsUpdate(_) => updated = true,
                 ActiveStageOutput::Terminate(reason) => return Ok(format!("Sitzung beendet ({reason})")),
                 ActiveStageOutput::DeactivateAll => {
-                    bail!("Der Server hat die Sitzung neu initialisiert (z. B. Auflösung geändert) — bitte neu verbinden")
+                    // Neue Auflösung: Aktivierung mit der angeforderten Größe neu durchlaufen.
+                    let mut activation_config = config.clone();
+                    activation_config.desktop_size = DesktopSize { width: requested_size.0, height: requested_size.1 };
+                    activation_config.desktop_scale_factor = requested_size.2;
+                    let mut activation = ConnectionActivationSequence::new(activation_config, io_channel_id, user_channel_id);
+                    let mut buf = WriteBuf::new();
+                    loop {
+                        let written = ironrdp_async::single_sequence_step_read(&mut reader, &mut activation, &mut buf)
+                            .await
+                            .map_err(|e| anyhow!("Reaktivierung: {e}"))?;
+                        if let Some(len) = written.size() {
+                            writer.write_all(&buf.filled()[..len]).await.context("Senden an den Server")?;
+                        }
+                        if let ConnectionActivationState::Finalized {
+                            desktop_size,
+                            share_id,
+                            static_channel_chunk_size,
+                            enable_server_pointer,
+                            pointer_software_rendering,
+                            ..
+                        } = activation.connection_activation_state()
+                        {
+                            image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+                            if !stage.reactivate(
+                                io_channel_id,
+                                user_channel_id,
+                                share_id,
+                                enable_server_pointer,
+                                pointer_software_rendering,
+                                static_channel_chunk_size,
+                            ) {
+                                bail!("Reaktivierung fehlgeschlagen");
+                            }
+                            publish_size(framebuffer, &image);
+                            break;
+                        }
+                    }
                 }
                 _ => {}
             }
         }
+
+        let events = std::mem::take(&mut *clip_events.lock().unwrap_or_else(|e| e.into_inner()));
+        for event in events {
+            let frame = match event {
+                ClipEvent::Ready => clipboard_frame(&mut stage, |c| announce_text(c, local_text.is_some()))?,
+                ClipEvent::RemoteHasText => clipboard_frame(&mut stage, |c| c.initiate_paste(ClipboardFormatId::CF_UNICODETEXT))?,
+                ClipEvent::Requested(format) => {
+                    let response = match (&local_text, format == ClipboardFormatId::CF_UNICODETEXT) {
+                        (Some(text), true) => FormatDataResponse::new_unicode_string(text),
+                        _ => FormatDataResponse::new_error(),
+                    };
+                    clipboard_frame(&mut stage, |c| c.submit_format_data(response))?
+                }
+                ClipEvent::RemoteText(text) => {
+                    framebuffer.lock().unwrap_or_else(|e| e.into_inner()).clipboard = Some(text);
+                    conn.repaint();
+                    None
+                }
+            };
+            if let Some(frame) = frame {
+                writer.write_all(&frame).await.context("Senden an den Server")?;
+            }
+        }
+
         if updated {
             let mut fb = framebuffer.lock().unwrap_or_else(|e| e.into_inner());
             fb.pixels.copy_from_slice(image.data());
@@ -216,6 +403,15 @@ async fn run(
     }
 }
 
+/// Übernimmt Größe und Inhalt eines (neuen) Bildspeichers für die Oberfläche.
+fn publish_size(framebuffer: &Mutex<Framebuffer>, image: &DecodedImage) {
+    let mut fb = framebuffer.lock().unwrap_or_else(|e| e.into_inner());
+    fb.width = image.width().into();
+    fb.height = image.height().into();
+    fb.pixels = image.data().to_vec();
+    fb.dirty = true;
+}
+
 type Upgraded = ironrdp_tokio::TokioFramed<ironrdp_tls::TlsStream<tokio::net::TcpStream>>;
 
 /// X.224-Aushandlung, TLS mit Zertifikatsprüfung (s. Moduldoku) und CredSSP.
@@ -223,6 +419,7 @@ async fn connect(
     host: &str,
     port: u16,
     config: ironrdp_connector::Config,
+    clip_events: &Arc<Mutex<Vec<ClipEvent>>>,
     conn: &Conn,
 ) -> Result<(ironrdp_connector::ConnectionResult, Upgraded)> {
     let endpoint = format!("{host}:{port}");
@@ -235,7 +432,10 @@ async fn connect(
         tcp.set_nodelay(true)?;
         let client_addr: SocketAddr = tcp.local_addr()?;
         let mut framed = ironrdp_tokio::TokioFramed::new(tcp);
-        let mut connector = ClientConnector::new(config.clone(), client_addr);
+        let mut connector = ClientConnector::new(config.clone(), client_addr)
+            // Display Control: Größe während der Sitzung ändern; die Fähigkeiten des Servers braucht es nicht zu beantworten.
+            .with_static_channel(DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))))
+            .with_static_channel(CliprdrClient::new(Box::new(ClipBackend { events: Arc::clone(clip_events) })));
         let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector).await.map_err(|e| anyhow!("{e}"))?;
 
         let known = known_certificates();
@@ -402,6 +602,13 @@ fn remember_certificate(endpoint: &str, fingerprint: &str) -> Result<()> {
 #[derive(Default)]
 pub struct RdpView {
     started: bool,
+    /// Zuletzt an Windows gemeldete Größe und eine noch nicht gemeldete Änderung.
+    sent_size: (u16, u16),
+    pending_size: Option<((u16, u16), Instant)>,
+    clipboard: Option<arboard::Clipboard>,
+    /// Zuletzt gesehener Text der lokalen Zwischenablage (auch aus Windows übernommener).
+    clipboard_seen: Option<String>,
+    clipboard_polled: Option<Instant>,
     texture: Option<egui::TextureHandle>,
     buttons: [bool; 3],
     position: (u16, u16),
@@ -422,18 +629,20 @@ impl RdpView {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         ui.painter_at(rect).rect_filled(rect, 0.0, Color32::BLACK);
 
+        // Desktop in physischen Pixeln anlegen und Windows die Skalierung mitteilen (z. B. 200 % auf Retina).
+        let ppp = ui.ctx().pixels_per_point();
+        let size = ((rect.width() * ppp).clamp(640.0, 8192.0) as u16, (rect.height() * ppp).clamp(480.0, 8192.0) as u16);
+        let scale_percent = ((ppp * 100.0).round() as u32).clamp(100, 500);
         if !self.started {
-            // Desktop in physischen Pixeln anlegen und Windows die Skalierung mitteilen (z. B. 200 % auf Retina).
-            let ppp = ui.ctx().pixels_per_point();
-            let width = (rect.width() * ppp).clamp(640.0, 8192.0) as u16;
-            let height = (rect.height() * ppp).clamp(480.0, 8192.0) as u16;
-            let scale_percent = ((ppp * 100.0).round() as u32).clamp(100, 500);
-            let _ = session.input.send(Input::Start { width, height, scale_percent });
+            let _ = session.input.send(Input::Start { width: size.0, height: size.1, scale_percent });
             self.started = true;
+            self.sent_size = size;
         }
 
         let status = session.conn().status();
         if matches!(status, Status::Connected) {
+            self.resize(ui, size, scale_percent, session);
+            self.sync_clipboard(ui, session);
             if !self.focus_requested || response.clicked() || response.drag_started() {
                 response.request_focus();
                 self.focus_requested = true;
@@ -451,6 +660,54 @@ impl RdpView {
         }
         self.overlay.show(ui, rect, session.conn(), &status, &mut out);
         out
+    }
+
+    /// Meldet eine neue Tab-Größe erst, wenn sie eine Weile stabil ist (z. B. nach dem Ziehen am Fensterrand).
+    fn resize(&mut self, ui: &egui::Ui, size: (u16, u16), scale_percent: u32, session: &RdpSession) {
+        if size == self.sent_size {
+            self.pending_size = None;
+            return;
+        }
+        match self.pending_size {
+            Some((pending, since)) if pending == size => {
+                if since.elapsed() >= RESIZE_DEBOUNCE {
+                    let _ = session.input.send(Input::Resize { width: size.0, height: size.1, scale_percent });
+                    self.sent_size = size;
+                    self.pending_size = None;
+                } else {
+                    ui.ctx().request_repaint_after(RESIZE_DEBOUNCE - since.elapsed());
+                }
+            }
+            _ => {
+                self.pending_size = Some((size, Instant::now()));
+                ui.ctx().request_repaint_after(RESIZE_DEBOUNCE);
+            }
+        }
+    }
+
+    /// Text aus Windows in die lokale Zwischenablage, neuer lokaler Text an Windows.
+    fn sync_clipboard(&mut self, ui: &egui::Ui, session: &RdpSession) {
+        if let Some(text) = session.framebuffer().clipboard.take() {
+            ui.ctx().copy_text(text.clone());
+            self.clipboard_seen = Some(text);
+        }
+        if self.clipboard_polled.is_some_and(|t| t.elapsed() < CLIPBOARD_POLL) {
+            return;
+        }
+        self.clipboard_polled = Some(Instant::now());
+        ui.ctx().request_repaint_after(CLIPBOARD_POLL);
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else { return };
+        self.offer_local_text(text, session);
+    }
+
+    fn offer_local_text(&mut self, text: String, session: &RdpSession) {
+        if self.clipboard_seen.as_ref() != Some(&text) {
+            self.clipboard_seen = Some(text.clone());
+            let _ = session.input.send(Input::LocalClipboard(text));
+        }
     }
 
     fn paint(&mut self, ui: &mut egui::Ui, rect: Rect, session: &RdpSession) -> Option<Rect> {
@@ -520,16 +777,15 @@ impl RdpView {
             match event {
                 // Text als Unicode: unabhängig vom Tastaturlayout auf beiden Seiten.
                 Event::Text(text) => text.chars().for_each(|c| unicode_tap(&mut ops, c)),
-                Event::Paste(text) => text.chars().take(MAX_PASTE_CHARS).for_each(|c| {
-                    if c == '\n' {
-                        tap(&mut ops, scancode::ENTER);
-                    } else if c != '\r' {
-                        unicode_tap(&mut ops, c);
-                    }
-                }),
-                // Unter Windows/Linux kommen Strg+C/X als Copy/Cut statt als Tasten.
-                Event::Copy if !cfg!(target_os = "macos") => tap(&mut ops, letter_scancode('c').expect("c")),
-                Event::Cut if !cfg!(target_os = "macos") => tap(&mut ops, letter_scancode('x').expect("x")),
+                // ⌘/Strg+C, X und V kommen als Copy/Cut/Paste statt als Tasten. Die Strg-Taste ist
+                // schon gedrückt gemeldet (⌘ → Strg), also nur die Buchstabentaste schicken.
+                // Beim Einfügen vorher den Text anbieten, damit Windows aus der abgeglichenen Ablage einfügt.
+                Event::Paste(text) => {
+                    self.offer_local_text(text, session);
+                    tap(&mut ops, letter_scancode('v').expect("v"));
+                }
+                Event::Copy => tap(&mut ops, letter_scancode('c').expect("c")),
+                Event::Cut => tap(&mut ops, letter_scancode('x').expect("x")),
                 Event::Key { key, physical_key, pressed, modifiers, .. } => {
                     let code = special_scancode(key).or_else(|| {
                         // Mit Strg/Cmd erzeugt egui keinen Text; die physische Taste schicken,
@@ -588,7 +844,6 @@ fn unicode_tap(ops: &mut Vec<Operation>, c: char) {
 mod scancode {
     use ironrdp_input::Scancode;
 
-    pub const ENTER: Scancode = Scancode::from_u8(false, 0x1C);
     pub const SHIFT_L: Scancode = Scancode::from_u8(false, 0x2A);
     pub const CONTROL_L: Scancode = Scancode::from_u8(false, 0x1D);
     pub const ALT_L: Scancode = Scancode::from_u8(false, 0x38);
@@ -837,6 +1092,67 @@ mod tests {
         );
         assert!(view.texture.is_some());
         assert!(!session.framebuffer().dirty, "Bild in die Textur übernommen");
+    }
+
+    #[test]
+    fn clipboard_backend_events() {
+        let events: Arc<Mutex<Vec<ClipEvent>>> = Arc::default();
+        let mut backend = ClipBackend { events: Arc::clone(&events) };
+        backend.on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]);
+        backend.on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::new(2))]);
+        backend.on_format_data_response(FormatDataResponse::new_unicode_string("Grüße ✓"));
+        backend.on_format_data_response(FormatDataResponse::new_error());
+        assert_eq!(
+            *events.lock().unwrap(),
+            [ClipEvent::RemoteHasText, ClipEvent::RemoteText("Grüße ✓".into())],
+            "nur Text, ohne abschließende Null; Fehlerantworten ignoriert"
+        );
+    }
+
+    /// Prüft, was die Ansicht an die Sitzungsschleife schickt (ohne laufende Verbindung).
+    fn view_with_channel() -> (RdpView, RdpSession, mpsc::UnboundedReceiver<Input>) {
+        let (input, rx) = mpsc::unbounded_channel();
+        let session = RdpSession {
+            conn: Conn::new(egui::Context::default()),
+            framebuffer: Arc::default(),
+            input,
+        };
+        (RdpView::default(), session, rx)
+    }
+
+    #[test]
+    fn local_clipboard_is_offered_once() {
+        let (mut view, session, mut rx) = view_with_channel();
+        view.offer_local_text("a".into(), &session);
+        view.offer_local_text("a".into(), &session);
+        // Aus Windows übernommener Text wird nicht zurückgeschickt.
+        view.clipboard_seen = Some("von Windows".into());
+        view.offer_local_text("von Windows".into(), &session);
+        view.offer_local_text("b".into(), &session);
+        let mut sent = Vec::new();
+        while let Ok(Input::LocalClipboard(text)) = rx.try_recv() {
+            sent.push(text);
+        }
+        assert_eq!(sent, ["a", "b"]);
+    }
+
+    #[test]
+    fn resize_is_debounced() {
+        let (mut view, session, mut rx) = view_with_channel();
+        let ctx = egui::Context::default();
+        view.sent_size = (1000, 800);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                view.resize(ui, (1200, 800), 200, &session);
+                view.resize(ui, (1300, 800), 200, &session);
+                assert!(rx.try_recv().is_err(), "während des Ziehens nichts senden");
+                // Größe stabil und Ruhezeit vorbei → senden.
+                view.pending_size = Some(((1300, 800), Instant::now() - RESIZE_DEBOUNCE));
+                view.resize(ui, (1300, 800), 200, &session);
+            });
+        });
+        assert!(matches!(rx.try_recv(), Ok(Input::Resize { width: 1300, height: 800, scale_percent: 200 })));
+        assert_eq!(view.sent_size, (1300, 800));
     }
 
     /// Verbindungsversuch zu einem geschlossenen Port: sauberer Fehler, keine Hänger.
