@@ -311,6 +311,9 @@ enum Action {
     CopyPassword(String),
     ActivateTab(Option<usize>),
     CloseTab(usize),
+    /// Alle Sitzungs-Tabs außer diesem schließen.
+    CloseOtherTabs(usize),
+    CloseAllTabs,
     Reconnect(usize),
     /// SFTP-Browser für eine SSH-Verbindung.
     OpenSftp(String),
@@ -729,6 +732,22 @@ impl Session {
                     };
                 }
                 Ok(None)
+            }
+            Action::CloseOtherTabs(index) => {
+                if index < self.tabs.len() {
+                    let keep = self.tabs.swap_remove(index);
+                    self.tabs = vec![keep];
+                    if self.active_tab.is_some() {
+                        self.active_tab = Some(0);
+                    }
+                }
+                Ok(None)
+            }
+            Action::CloseAllTabs => {
+                let count = self.tabs.len();
+                self.tabs.clear();
+                self.active_tab = None;
+                Ok(Some(t!("{count} Verbindungen geschlossen", "Closed {count} connections")))
             }
             Action::Select(id) => {
                 self.mark(&id);
@@ -1560,6 +1579,15 @@ fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
         if label.middle_clicked() || ui.small_button("✖").on_hover_text(ts!("Tab schließen", "Close tab")).clicked() {
             *action = Some(Action::CloseTab(index));
         }
+        label.context_menu(|ui| {
+            menu_item(ui, ts!("🔄 Neu verbinden", "🔄 Reconnect"), action, || Action::Reconnect(index));
+            ui.separator();
+            menu_item(ui, ts!("Schließen", "Close"), action, || Action::CloseTab(index));
+            if s.tabs.len() > 1 {
+                menu_item(ui, ts!("Andere schließen", "Close others"), action, || Action::CloseOtherTabs(index));
+            }
+            menu_item(ui, ts!("Alle Verbindungen schließen", "Close all connections"), action, || Action::CloseAllTabs);
+        });
     }
 }
 
@@ -2399,6 +2427,48 @@ mod tests {
             "horizon-client://fred@view.firma.de/Finance%20Desktop?domainName=FIRMA&desktopProtocol=BLAST"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tab_context_menu_closes_others_and_all() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut s = session();
+        let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+        let ctx = ui.ctx.clone();
+        let add_tab = |s: &mut Session, title: &str| {
+            let session = SshSession::start(
+                runtime.handle(),
+                ctx.clone(),
+                ConnectParams { host: "127.0.0.1".into(), port: 1, username: "x".into(), password: None, private_key: None, passphrase: None },
+            );
+            s.tabs.push(Tab {
+                conn_id: title.into(),
+                title: title.into(),
+                tooltip: String::new(),
+                color: None,
+                content: TabContent::Terminal { session, view: TerminalView::default() },
+                adhoc: None,
+            });
+        };
+        for title in ["Tab A", "Tab B", "Tab C"] {
+            add_tab(&mut s, title);
+        }
+        s.active_tab = Some(1);
+        ui.frame(&mut s);
+        ui.frame(&mut s);
+
+        ui.click(&mut s, "Tab B", egui::PointerButton::Secondary);
+        ui.frame(&mut s);
+        ui.click(&mut s, "Andere schließen", egui::PointerButton::Primary);
+        assert_eq!(s.tabs.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Tab B"]);
+        assert_eq!(s.active_tab, Some(0));
+
+        add_tab(&mut s, "Tab D");
+        ui.frame(&mut s);
+        ui.click(&mut s, "Tab D", egui::PointerButton::Secondary);
+        ui.frame(&mut s);
+        ui.click(&mut s, "Alle Verbindungen schließen", egui::PointerButton::Primary);
+        assert!(s.tabs.is_empty() && s.active_tab.is_none());
     }
 
     #[test]

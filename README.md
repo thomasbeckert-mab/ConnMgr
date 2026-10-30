@@ -135,7 +135,7 @@ Horizon-Desktops und -Apps laufen im **Omnissa Horizon Client** (Blast/PCoIP sin
 - Schnellverbindung: `horizon://view.firma.de/Finance Desktop`.
 - Start: macOS `open` (vorher Prüfung, ob der Horizon Client installiert ist), Windows URL-Handler, Linux `xdg-open`.
 
-Beendete Sitzungen lassen sich im Tab neu verbinden. **Sperren trennt alle Sitzungen.**
+Beendete Sitzungen lassen sich im Tab neu verbinden. **Rechtsklick auf einen Tab:** Neu verbinden, Schließen, Andere schließen, Alle Verbindungen schließen. **Sperren trennt alle Sitzungen.**
 
 ### Tests gegen echte Server
 
