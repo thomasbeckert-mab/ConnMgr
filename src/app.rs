@@ -1121,7 +1121,22 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            // Schnellverbindung vorne, damit sie auch bei schmalem Fenster sichtbar bleibt.
+            // Menü ganz links, danach die Schnellverbindung, damit beides auch bei schmalem Fenster sichtbar bleibt.
+            ui.menu_button("☰", |ui| {
+                menu_item(ui, ts!("⚙ Einstellungen …", "⚙ Settings …"), &mut action, || Action::OpenDialog(Dialog::Settings));
+                ui.separator();
+                menu_item(ui, ts!("Master-Passwort ändern …", "Change master password …"), &mut action, || Action::OpenDialog(Dialog::change_master()));
+                ui.separator();
+                menu_item(ui, ts!("Alles exportieren …", "Export everything …"), &mut action, || Action::OpenDialog(Dialog::export(None)));
+                if ui.button(ts!("Importieren …", "Import …")).clicked() {
+                    ui.close_menu();
+                    let picked = rfd::FileDialog::new().set_title(ts!("ConnMgr-Datei importieren", "Import ConnMgr file")).add_filter("ConnMgr", &["json"]).pick_file();
+                    if let Some(path) = picked {
+                        action = Some(Action::OpenDialog(Dialog::Import { path, password: Zeroizing::default(), error: None }));
+                    }
+                }
+            });
+            ui.separator();
             quick_connect_field(ui, s, &mut action);
             ui.separator();
             let parent = s.default_parent();
@@ -1141,20 +1156,6 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                 if ui.button(ts!("🔒 Sperren", "🔒 Lock")).clicked() {
                     action = Some(Action::Lock);
                 }
-                ui.menu_button("☰", |ui| {
-                    menu_item(ui, ts!("⚙ Einstellungen …", "⚙ Settings …"), &mut action, || Action::OpenDialog(Dialog::Settings));
-                    ui.separator();
-                    menu_item(ui, ts!("Master-Passwort ändern …", "Change master password …"), &mut action, || Action::OpenDialog(Dialog::change_master()));
-                    ui.separator();
-                    menu_item(ui, ts!("Alles exportieren …", "Export everything …"), &mut action, || Action::OpenDialog(Dialog::export(None)));
-                    if ui.button(ts!("Importieren …", "Import …")).clicked() {
-                        ui.close_menu();
-                        let picked = rfd::FileDialog::new().set_title(ts!("ConnMgr-Datei importieren", "Import ConnMgr file")).add_filter("ConnMgr", &["json"]).pick_file();
-                        if let Some(path) = picked {
-                            action = Some(Action::OpenDialog(Dialog::Import { path, password: Zeroizing::default(), error: None }));
-                        }
-                    }
-                });
             });
         });
         ui.add_space(2.0);
