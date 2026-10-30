@@ -9,7 +9,8 @@ use crate::askpass;
 use crate::crypto::Vault;
 use crate::launcher;
 use crate::model::{self, Connection, Credential, CredentialSource, Folder, Node, Protocol, SecretField, Target};
-use crate::ssh::{self, ConnectParams, SshSession};
+use crate::sftp::{SftpSessionHandle, SftpView};
+use crate::ssh::{self, Conn, ConnectParams, SshSession};
 use crate::store::{self, StoreFile};
 use crate::terminal::TerminalView;
 
@@ -109,8 +110,34 @@ struct Tab {
     title: String,
     tooltip: String,
     color: Option<Color32>,
-    session: SshSession,
-    view: TerminalView,
+    content: TabContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabKind {
+    Terminal,
+    Sftp,
+}
+
+enum TabContent {
+    Terminal { session: SshSession, view: TerminalView },
+    Sftp { session: SftpSessionHandle, view: SftpView },
+}
+
+impl Tab {
+    fn conn(&self) -> &Conn {
+        match &self.content {
+            TabContent::Terminal { session, .. } => session.conn(),
+            TabContent::Sftp { session, .. } => session.conn(),
+        }
+    }
+
+    fn kind(&self) -> TabKind {
+        match self.content {
+            TabContent::Terminal { .. } => TabKind::Terminal,
+            TabContent::Sftp { .. } => TabKind::Sftp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +282,8 @@ enum Action {
     ActivateTab(Option<usize>),
     CloseTab(usize),
     Reconnect(usize),
+    /// SFTP-Browser für eine SSH-Verbindung.
+    OpenSftp(String),
     OpenDialog(Dialog),
     CloseDialog,
     /// Führt den offenen Dialog aus.
@@ -291,15 +320,17 @@ impl ConMgrApp {
                 Ok(())
             }
             Action::Connect(id) => match self.session().ok().and_then(|s| model::find_connection(&s.store.items, &id)) {
-                Some(c) if c.protocol == Protocol::Ssh => self.open_ssh_tab(ctx, &id, None),
+                Some(c) if c.protocol == Protocol::Ssh => self.open_tab(ctx, &id, TabKind::Terminal, None),
+                Some(c) if c.protocol == Protocol::Sftp => self.open_tab(ctx, &id, TabKind::Sftp, None),
                 _ => self.connect(&id),
             },
             Action::ConnectExternal(id) => self.connect(&id),
+            Action::OpenSftp(id) => self.open_tab(ctx, &id, TabKind::Sftp, None),
             Action::Reconnect(index) => match &self.state {
                 State::Unlocked(s) => match s.tabs.get(index) {
                     Some(tab) => {
-                        let id = tab.conn_id.clone();
-                        self.open_ssh_tab(ctx, &id, Some(index))
+                        let (id, kind) = (tab.conn_id.clone(), tab.kind());
+                        self.open_tab(ctx, &id, kind, Some(index))
                     }
                     None => Ok(()),
                 },
@@ -381,8 +412,8 @@ impl ConMgrApp {
         Ok(())
     }
 
-    /// Öffnet eine eingebettete SSH-Sitzung in einem neuen Tab oder ersetzt die in `replace`.
-    fn open_ssh_tab(&mut self, ctx: &egui::Context, id: &str, replace: Option<usize>) -> Result<()> {
+    /// Öffnet eine eingebettete Sitzung in einem neuen Tab oder ersetzt die in `replace`.
+    fn open_tab(&mut self, ctx: &egui::Context, id: &str, kind: TabKind, replace: Option<usize>) -> Result<()> {
         let runtime = self.runtime()?.handle().clone();
         let State::Unlocked(session) = &mut self.state else { bail!("Gesperrt") };
         let node = model::find(&session.store.items, id).ok_or_else(|| anyhow!("Verbindung nicht gefunden"))?;
@@ -391,17 +422,24 @@ impl ConMgrApp {
         model::validate_host(&conn.host).map_err(|e| anyhow!(e))?;
         model::validate_username(&username).map_err(|e| anyhow!(e))?;
 
+        let tooltip = if username.is_empty() { conn.host_port() } else { format!("{username}@{}", conn.host_port()) };
+        let params = ConnectParams { host: conn.host.clone(), port: conn.port, username, password, private_key, passphrase };
+        let (title, content) = match kind {
+            TabKind::Terminal => (
+                format!("{}  {}", node.icon(), conn.name),
+                TabContent::Terminal { session: SshSession::start(&runtime, ctx.clone(), params), view: TerminalView::default() },
+            ),
+            TabKind::Sftp => (
+                format!("📂  {}", conn.name),
+                TabContent::Sftp { session: SftpSessionHandle::start(&runtime, ctx.clone(), params), view: SftpView::default() },
+            ),
+        };
         let tab = Tab {
             conn_id: conn.id.clone(),
-            title: format!("{}  {}", node.icon(), conn.name),
-            tooltip: if username.is_empty() { conn.host_port() } else { format!("{username}@{}", conn.host_port()) },
+            title,
+            tooltip,
             color: node.color().and_then(model::parse_color).map(|[r, g, b]| Color32::from_rgb(r, g, b)),
-            session: SshSession::start(
-                &runtime,
-                ctx.clone(),
-                ConnectParams { host: conn.host.clone(), port: conn.port, username, password, private_key, passphrase },
-            ),
-            view: TerminalView::default(),
+            content,
         };
         self.status = format!("{}: verbinde …", conn.name);
         let index = match replace {
@@ -576,6 +614,7 @@ impl Session {
             | Action::Connect(_)
             | Action::ConnectExternal(_)
             | Action::Reconnect(_)
+            | Action::OpenSftp(_)
             | Action::CopyPassword(_) => Ok(None),
         }
     }
@@ -935,7 +974,10 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
     egui::CentralPanel::default().show(ctx, |ui| {
         if let Some(index) = s.active_tab {
             if let Some(tab) = s.tabs.get_mut(index) {
-                let response = tab.view.show(ui, &tab.session);
+                let response = match &mut tab.content {
+                    TabContent::Terminal { session, view } => view.show(ui, session),
+                    TabContent::Sftp { session, view } => view.show(ui, session),
+                };
                 if response.reconnect {
                     action = Some(Action::Reconnect(index));
                 }
@@ -1045,7 +1087,7 @@ fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
     }
     for (index, tab) in s.tabs.iter().enumerate() {
         ui.separator();
-        let (dot, dot_color) = match tab.session.conn().status() {
+        let (dot, dot_color) = match tab.conn().status() {
             ssh::Status::Connected => ("●", Color32::from_rgb(0x23, 0xd1, 0x8b)),
             ssh::Status::Connecting | ssh::Status::HostKey { .. } | ssh::Status::Prompt { .. } => {
                 ("●", Color32::from_rgb(0xf5, 0xb0, 0x41))
@@ -1184,8 +1226,15 @@ impl TreeView<'_> {
             match node {
                 Node::Connection(c) => {
                     menu_item(ui, "▶ Verbinden", action, || Action::Connect(id.to_owned()));
-                    if c.protocol == Protocol::Ssh {
-                        menu_item(ui, "In externem Terminal öffnen", action, || Action::ConnectExternal(id.to_owned()));
+                    match c.protocol {
+                        Protocol::Ssh => {
+                            menu_item(ui, "📂 SFTP-Browser", action, || Action::OpenSftp(id.to_owned()));
+                            menu_item(ui, "In externem Terminal öffnen", action, || Action::ConnectExternal(id.to_owned()));
+                        }
+                        Protocol::Sftp => {
+                            menu_item(ui, "Mit externem sftp öffnen", action, || Action::ConnectExternal(id.to_owned()));
+                        }
+                        Protocol::Rdp | Protocol::Vnc => {}
                     }
                     menu_item(ui, "📋 Passwort kopieren", action, || Action::CopyPassword(id.to_owned()));
                     let fav = if c.favorite { "☆ Kein Favorit mehr" } else { "⭐ Als Favorit" };
@@ -1372,8 +1421,16 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete:
         if kind == Kind::Connection && ui.button("▶ Verbinden").clicked() {
             *action = Some(Action::Connect(id.clone()));
         }
-        let is_ssh = matches!(&ed.body, EditorBody::Connection { protocol: Protocol::Ssh, .. });
-        if is_ssh && ui.button("Extern").on_hover_text("Im Terminal des Betriebssystems öffnen").clicked() {
+        let protocol = match &ed.body {
+            EditorBody::Connection { protocol, .. } => Some(*protocol),
+            _ => None,
+        };
+        if protocol == Some(Protocol::Ssh) && ui.button("📂 SFTP").on_hover_text("Dateibrowser für diesen Server").clicked() {
+            *action = Some(Action::OpenSftp(id.clone()));
+        }
+        if matches!(protocol, Some(Protocol::Ssh | Protocol::Sftp))
+            && ui.button("Extern").on_hover_text("Im Terminal des Betriebssystems öffnen").clicked()
+        {
             *action = Some(Action::ConnectExternal(id.clone()));
         }
         if kind != Kind::Folder && ui.button("📋 Passwort kopieren").clicked() {
@@ -1577,8 +1634,7 @@ mod tests {
             title: "web01".into(),
             tooltip: String::new(),
             color: None,
-            session,
-            view: TerminalView::default(),
+            content: TabContent::Terminal { session, view: TerminalView::default() },
         });
         s.active_tab = Some(0);
 
@@ -1587,14 +1643,15 @@ mod tests {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 session_ui(ctx, &mut s, "Status", Path::new("test.json"));
             });
-            if let ssh::Status::Closed(msg) = &s.tabs[0].session.conn().status() {
+            if let ssh::Status::Closed(msg) = &s.tabs[0].conn().status() {
                 assert!(msg.starts_with("Fehler"), "{msg}");
                 break;
             }
             assert!(Instant::now() < deadline, "Verbindung wurde nicht beendet");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_ne!(s.tabs[0].session.parser().screen().size(), (24, 80), "Terminal passt sich der Fläche an");
+        let TabContent::Terminal { session, .. } = &s.tabs[0].content else { unreachable!() };
+        assert_ne!(session.parser().screen().size(), (24, 80), "Terminal passt sich der Fläche an");
 
         s.apply(Action::CloseTab(0), Path::new("unused.json")).unwrap();
         assert!(s.tabs.is_empty());
