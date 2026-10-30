@@ -1,0 +1,27 @@
+[package]
+name = "conmgr"
+version = "0.1.0"
+edition = "2021"
+description = "Plattformübergreifender Verbindungsmanager für SSH, SFTP, RDP und VNC"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+arboard = "3"
+argon2 = "0.5"
+base64 = "0.22"
+directories = "5"
+eframe = "0.29"
+rand = "0.8"
+rpassword = "7"
+russh = { version = "~0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "~1.53.2", features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+vt100 = "~0.16.2"
+zeroize = "1"
+
+[profile.release]
+lto = true
+strip = true
