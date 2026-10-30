@@ -91,7 +91,7 @@ impl Conn {
         self.answer_prompt(None);
     }
 
-    async fn ask_host_key(&self, fingerprint: String, algorithm: String) -> bool {
+    pub(crate) async fn ask_host_key(&self, fingerprint: String, algorithm: String) -> bool {
         let (reply, answer) = oneshot::channel();
         {
             let mut state = self.state();

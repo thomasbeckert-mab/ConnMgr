@@ -71,7 +71,7 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 
 ## Sitzungen in Tabs
 
-Ein Doppelklick öffnet SSH, SFTP und VNC als Tab direkt in ConMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems. RDP läuft weiterhin extern.
+Ein Doppelklick öffnet SSH, SFTP, RDP und VNC als Tab direkt in ConMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems.
 
 ### SSH-Terminal
 
@@ -91,6 +91,16 @@ Fehlt eine **Passphrase** oder ein Passwort – oder wird das gespeicherte abgel
 
 Für SFTP-Verbindungen per Doppelklick, für SSH-Verbindungen über „📂 SFTP“. Gleiche Anmeldung wie das Terminal. Pfadleiste, Home, Aktualisieren; Doppelklick öffnet Ordner bzw. lädt Dateien herunter. **Hochladen** per Knopf oder **Drag & Drop aus Finder/Explorer**, Übertragungen mit Fortschritt laufen nebenher. Neuer Ordner, Umbenennen, Löschen (Ordner nur, wenn leer).
 
+### RDP
+
+Über [IronRDP](https://github.com/Devolutions/IronRDP): TLS mit **NLA** (CredSSP/NTLM), Desktop in Tab-Größe (physische Pixel; auf Retina-Displays meldet ConMgr Windows die passende Skalierung, z. B. 200 %). Maus inkl. Rad, Tastatur: Text geht als Unicode an den Server und ist damit unabhängig vom Tastaturlayout; Sondertasten und Kürzel als Scancodes (unter macOS wird ⌘ zu Strg, also ⌘C/⌘V wie gewohnt). `⌘V` tippt den Text der Zwischenablage.
+
+Anmeldung: Benutzer als `benutzer`, `DOMÄNE\benutzer` oder `benutzer@domäne`; fehlen Benutzer oder Passwort, fragt der Tab nach.
+
+**Zertifikate:** RDP-Server haben meist selbst signierte Zertifikate. Lässt sich das Zertifikat nicht prüfen, zeigt ConMgr den SHA-256-Fingerabdruck zur Bestätigung und merkt ihn sich in `rdp_certificates.json` (neben der Verbindungsdatei). **Ein geändertes Zertifikat wird abgelehnt** – Eintrag dort löschen, wenn der Server bewusst ein neues bekommen hat.
+
+Noch nicht: Kerberos, Smartcards, Sound, Laufwerks- und Zwischenablage-Umleitung, Größenänderung während der Sitzung (Tab-Größe gilt beim Verbinden), RD-Gateway.
+
 ### VNC
 
 Bild wird ins Fenster eingepasst; Maus (inkl. Rad) und Tastatur werden weitergegeben, `⌘V`/`Strg+V` tippt den Text der Zwischenablage auf der Gegenseite. Text aus der Zwischenablage des Servers wird übernommen. Kodierungen: ZRLE, CopyRect, Raw.
@@ -107,7 +117,7 @@ Die mit `#[ignore]` markierten Tests laufen gegen einen echten sshd. `HOME` muss
 CONMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored --test-threads=1
 ```
 
-Der VNC-Test bringt einen eigenen minimalen RFB-Server mit und läuft bei `cargo test` immer.
+Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener Server bis einschließlich TLS) laufen bei `cargo test` immer.
 
 ## Verschlüsselung
 

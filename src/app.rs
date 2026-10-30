@@ -9,6 +9,7 @@ use crate::askpass;
 use crate::crypto::Vault;
 use crate::launcher;
 use crate::model::{self, Connection, Credential, CredentialSource, Folder, Node, Protocol, SecretField, Target};
+use crate::rdp::{RdpParams, RdpSession, RdpView};
 use crate::sftp::{SftpSessionHandle, SftpView};
 use crate::ssh::{self, Conn, ConnectParams, SshSession};
 use crate::store::{self, StoreFile};
@@ -119,12 +120,14 @@ enum TabKind {
     Terminal,
     Sftp,
     Vnc,
+    Rdp,
 }
 
 enum TabContent {
     Terminal { session: SshSession, view: TerminalView },
     Sftp { session: SftpSessionHandle, view: SftpView },
     Vnc { session: VncSession, view: VncView },
+    Rdp { session: RdpSession, view: RdpView },
 }
 
 impl Tab {
@@ -133,6 +136,7 @@ impl Tab {
             TabContent::Terminal { session, .. } => session.conn(),
             TabContent::Sftp { session, .. } => session.conn(),
             TabContent::Vnc { session, .. } => session.conn(),
+            TabContent::Rdp { session, .. } => session.conn(),
         }
     }
 
@@ -141,6 +145,7 @@ impl Tab {
             TabContent::Terminal { .. } => TabKind::Terminal,
             TabContent::Sftp { .. } => TabKind::Sftp,
             TabContent::Vnc { .. } => TabKind::Vnc,
+            TabContent::Rdp { .. } => TabKind::Rdp,
         }
     }
 }
@@ -328,6 +333,7 @@ impl ConMgrApp {
                 Some(c) if c.protocol == Protocol::Ssh => self.open_tab(ctx, &id, TabKind::Terminal, None),
                 Some(c) if c.protocol == Protocol::Sftp => self.open_tab(ctx, &id, TabKind::Sftp, None),
                 Some(c) if c.protocol == Protocol::Vnc => self.open_tab(ctx, &id, TabKind::Vnc, None),
+                Some(c) if c.protocol == Protocol::Rdp => self.open_tab(ctx, &id, TabKind::Rdp, None),
                 _ => self.connect(&id),
             },
             Action::ConnectExternal(id) => self.connect(&id),
@@ -439,6 +445,13 @@ impl ConMgrApp {
                 format!("📂  {}", conn.name),
                 TabContent::Sftp { session: SftpSessionHandle::start(&runtime, ctx.clone(), params), view: SftpView::default() },
             ),
+            TabKind::Rdp => {
+                let params = RdpParams { host: params.host, port: params.port, username: params.username, password: params.password };
+                (
+                    format!("{}  {}", node.icon(), conn.name),
+                    TabContent::Rdp { session: RdpSession::start(&runtime, ctx.clone(), params), view: RdpView::default() },
+                )
+            }
             TabKind::Vnc => {
                 let params = VncParams { host: params.host, port: params.port, password: params.password };
                 (
@@ -991,6 +1004,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                     TabContent::Terminal { session, view } => view.show(ui, session),
                     TabContent::Sftp { session, view } => view.show(ui, session),
                     TabContent::Vnc { session, view } => view.show(ui, session),
+                    TabContent::Rdp { session, view } => view.show(ui, session),
                 };
                 if response.reconnect {
                     action = Some(Action::Reconnect(index));
@@ -1251,7 +1265,9 @@ impl TreeView<'_> {
                         Protocol::Vnc => {
                             menu_item(ui, "Mit externem Viewer öffnen", action, || Action::ConnectExternal(id.to_owned()));
                         }
-                        Protocol::Rdp => {}
+                        Protocol::Rdp => {
+                            menu_item(ui, "Mit externem RDP-Client öffnen", action, || Action::ConnectExternal(id.to_owned()));
+                        }
                     }
                     menu_item(ui, "📋 Passwort kopieren", action, || Action::CopyPassword(id.to_owned()));
                     let fav = if c.favorite { "☆ Kein Favorit mehr" } else { "⭐ Als Favorit" };
@@ -1445,7 +1461,7 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete:
         if protocol == Some(Protocol::Ssh) && ui.button("📂 SFTP").on_hover_text("Dateibrowser für diesen Server").clicked() {
             *action = Some(Action::OpenSftp(id.clone()));
         }
-        if matches!(protocol, Some(Protocol::Ssh | Protocol::Sftp | Protocol::Vnc))
+        if protocol.is_some()
             && ui.button("Extern").on_hover_text("Mit dem Programm des Betriebssystems öffnen").clicked()
         {
             *action = Some(Action::ConnectExternal(id.clone()));

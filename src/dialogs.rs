@@ -31,9 +31,9 @@ impl ConnOverlay {
                 });
             }),
             Status::HostKey { fingerprint, algorithm } => centered_frame(ui, rect, Vec2::new(560.0, 190.0), |ui| {
-                ui.heading("Unbekannter Host-Key");
+                ui.heading("Unbekannter Server");
                 ui.label(
-                    "Dieser Server ist noch nicht in ~/.ssh/known_hosts eingetragen. \
+                    "Die Identität dieses Servers ist noch nicht als vertrauenswürdig gespeichert. \
                      Vergleiche den Fingerabdruck mit dem des Servers, bevor du vertraust.",
                 );
                 ui.add_space(6.0);

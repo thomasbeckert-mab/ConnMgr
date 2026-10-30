@@ -526,7 +526,8 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 }
 
 pub fn validate_username(user: &str) -> Result<(), String> {
-    if user.starts_with('-') || user.chars().any(|c| c.is_whitespace() || c.is_control() || c == '@') {
+    // `@` ist erlaubt (UPN wie benutzer@firma.de); ssh trennt Benutzer und Host am letzten `@`.
+    if user.starts_with('-') || user.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("Ungültiger Benutzername: {user}"));
     }
     Ok(())
@@ -688,6 +689,15 @@ pub mod tests {
         assert!(validate_host("-oProxyCommand=x").is_err());
         assert!(validate_host("a b").is_err());
         assert!(validate_host("a;rm").is_err());
+    }
+
+    #[test]
+    fn username_validation() {
+        assert!(validate_username("root").is_ok());
+        assert!(validate_username("FIRMA\\admin").is_ok());
+        assert!(validate_username("admin@firma.de").is_ok());
+        assert!(validate_username("-oProxyCommand=x").is_err());
+        assert!(validate_username("a b").is_err());
     }
 
     #[test]

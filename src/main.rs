@@ -6,6 +6,7 @@ mod crypto;
 mod dialogs;
 mod launcher;
 mod model;
+mod rdp;
 mod sftp;
 mod ssh;
 mod terminal;
