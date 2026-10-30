@@ -96,10 +96,36 @@ pub struct Credential {
     /// Verschlüsselt mit der Zugangsdaten-ID als Associated Data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<Encrypted>,
+    /// Privater SSH-Schlüssel (OpenSSH-/PEM-/PuTTY-Text), verschlüsselt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<Encrypted>,
+    /// Passphrase des Schlüssels, verschlüsselt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<Encrypted>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+}
+
+/// Verschlüsselte Felder eines Eintrags. Jedes hat eigene Associated Data,
+/// damit sich Chiffrate weder zwischen Einträgen noch zwischen Feldern vertauschen lassen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretField {
+    Password,
+    PrivateKey,
+    Passphrase,
+}
+
+impl SecretField {
+    pub fn aad(self, owner_id: &str) -> String {
+        match self {
+            // Passwörter nutzen seit Format 1 die reine ID.
+            SecretField::Password => owner_id.to_owned(),
+            SecretField::PrivateKey => format!("{owner_id}/private_key"),
+            SecretField::Passphrase => format!("{owner_id}/passphrase"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +186,35 @@ impl Node {
             (_, Node::Folder(_)) => "📁",
             (_, Node::Connection(c)) => c.protocol.default_icon(),
             (_, Node::Credential(_)) => "🔑",
+        }
+    }
+
+    /// Alle verschlüsselten Felder dieses Eintrags (ohne Kinder).
+    pub fn secrets_mut(&mut self) -> Vec<(SecretField, &mut Option<Encrypted>)> {
+        match self {
+            Node::Folder(_) => Vec::new(),
+            Node::Connection(c) => vec![(SecretField::Password, &mut c.password)],
+            Node::Credential(c) => vec![
+                (SecretField::Password, &mut c.password),
+                (SecretField::PrivateKey, &mut c.private_key),
+                (SecretField::Passphrase, &mut c.passphrase),
+            ],
+        }
+    }
+
+    pub fn name_mut(&mut self) -> &mut String {
+        match self {
+            Node::Folder(f) => &mut f.name,
+            Node::Connection(c) => &mut c.name,
+            Node::Credential(c) => &mut c.name,
+        }
+    }
+
+    pub fn set_id(&mut self, id: String) {
+        match self {
+            Node::Folder(f) => f.id = id,
+            Node::Connection(c) => c.id = id,
+            Node::Credential(c) => c.id = id,
         }
     }
 
@@ -377,14 +432,43 @@ pub fn clear_credential_references(nodes: &mut [Node], cred_id: &str) {
     }
 }
 
+/// Entfernt Verweise auf Zugangsdaten, die es im Baum nicht gibt (z. B. nach einem Import).
+pub fn drop_dangling_references(nodes: &mut [Node]) {
+    fn referenced(nodes: &[Node], out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Node::Folder(f) => {
+                    out.extend(f.credential_id.clone());
+                    referenced(&f.children, out);
+                }
+                Node::Connection(c) => {
+                    if let CredentialSource::Stored { id } = &c.credentials {
+                        out.push(id.clone());
+                    }
+                }
+                Node::Credential(_) => {}
+            }
+        }
+    }
+    let mut ids = Vec::new();
+    referenced(nodes, &mut ids);
+    for id in ids {
+        if find_credential(nodes, &id).is_none() {
+            clear_credential_references(nodes, &id);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- Zugangsdaten auflösen
 
 /// Effektive Zugangsdaten einer Verbindung.
 pub struct Resolved<'a> {
     pub username: &'a str,
+    /// ID des Eintrags, dem die Geheimnisse gehören (für die Associated Data).
+    pub owner_id: &'a str,
     pub password: Option<&'a Encrypted>,
-    /// Associated Data, mit der `password` verschlüsselt wurde.
-    pub aad: &'a str,
+    pub private_key: Option<&'a Encrypted>,
+    pub passphrase: Option<&'a Encrypted>,
 }
 
 /// Erste Zugangsdaten entlang der Ordner oberhalb von `parent` (einschließlich `parent`).
@@ -400,15 +484,23 @@ pub fn inherited_credential<'a>(nodes: &'a [Node], parent: Option<&str>) -> Opti
 pub fn resolve<'a>(nodes: &'a [Node], conn: &'a Connection) -> Result<Option<Resolved<'a>>, String> {
     let from_credential = |c: &'a Credential| Resolved {
         username: &c.username,
+        owner_id: &c.id,
         password: c.password.as_ref(),
-        aad: &c.id,
+        private_key: c.private_key.as_ref(),
+        passphrase: c.passphrase.as_ref(),
     };
     match &conn.credentials {
         CredentialSource::Own => {
             if conn.username.is_empty() && conn.password.is_none() {
                 return Ok(None);
             }
-            Ok(Some(Resolved { username: &conn.username, password: conn.password.as_ref(), aad: &conn.id }))
+            Ok(Some(Resolved {
+                username: &conn.username,
+                owner_id: &conn.id,
+                password: conn.password.as_ref(),
+                private_key: None,
+                passphrase: None,
+            }))
         }
         CredentialSource::Stored { id } => find_credential(nodes, id)
             .map(|c| Some(from_credential(c)))
@@ -491,6 +583,8 @@ pub mod tests {
             name: id.into(),
             username: user.into(),
             password: None,
+            private_key: None,
+            passphrase: None,
             icon: None,
             color: None,
         })
@@ -572,6 +666,17 @@ pub mod tests {
         let ids: Vec<_> = credentials(&nodes).iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["admin", "deploy"]);
         assert_eq!(count(find(&nodes, "prod").unwrap()), 5);
+    }
+
+    #[test]
+    fn dangling_references_are_dropped() {
+        let mut nodes = vec![folder("f", Some("weg"), vec![conn("x", CredentialSource::Stored { id: "weg".into() })]), cred("da", "u")];
+        nodes.push(conn("y", CredentialSource::Stored { id: "da".into() }));
+        drop_dangling_references(&mut nodes);
+        let Node::Folder(f) = &nodes[0] else { unreachable!() };
+        assert!(f.credential_id.is_none());
+        assert_eq!(find_connection(&nodes, "x").unwrap().credentials, CredentialSource::Own);
+        assert_eq!(find_connection(&nodes, "y").unwrap().credentials, CredentialSource::Stored { id: "da".into() });
     }
 
     #[test]

@@ -2,19 +2,13 @@
 
 use eframe::egui::{self, Color32, CursorIcon, Event, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2};
 
+use crate::dialogs::{ConnOverlay, TabResponse};
 use crate::ssh::{SshSession, Status};
 
 const FONT_SIZE: f32 = 13.0;
 const BACKGROUND: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
 const FOREGROUND: Color32 = Color32::from_rgb(0xd4, 0xd4, 0xd4);
 const SELECTION: Color32 = Color32::from_rgb(0x26, 0x4f, 0x78);
-
-/// Was die Oberfläche nach dem Zeichnen tun soll.
-#[derive(Default)]
-pub struct TerminalResponse {
-    pub reconnect: bool,
-    pub close: bool,
-}
 
 /// Zustand der Ansicht, der nicht zum Bildschirminhalt gehört.
 #[derive(Default)]
@@ -24,11 +18,13 @@ pub struct TerminalView {
     selection: Option<((u16, u16), (u16, u16))>,
     scroll_remainder: f32,
     focus_requested: bool,
+    overlay: ConnOverlay,
 }
 
 impl TerminalView {
-    pub fn show(&mut self, ui: &mut egui::Ui, session: &SshSession) -> TerminalResponse {
-        let mut out = TerminalResponse::default();
+    pub fn show(&mut self, ui: &mut egui::Ui, session: &SshSession) -> TabResponse {
+        let mut out = TabResponse::default();
+        let status = session.conn().status();
         let font = FontId::monospace(FONT_SIZE);
         let (cell_w, cell_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
 
@@ -73,22 +69,22 @@ impl TerminalView {
             self.selection = None;
         }
 
-        let mut shared = session.lock();
+        let mut parser = session.parser();
 
         // Mausrad blättert im Verlauf (nicht im Vollbildmodus von vim, less & Co.).
-        if response.hovered() && !shared.parser.screen().alternate_screen() {
+        if response.hovered() && !parser.screen().alternate_screen() {
             self.scroll_remainder += ui.input(|i| i.smooth_scroll_delta.y);
             let lines = (self.scroll_remainder / cell_h).trunc();
             if lines != 0.0 {
                 self.scroll_remainder -= lines * cell_h;
-                let screen = shared.parser.screen_mut();
+                let screen = parser.screen_mut();
                 let target = (screen.scrollback() as i64 + lines as i64).max(0) as usize;
                 screen.set_scrollback(target);
             }
         }
 
-        if focused && matches!(shared.status, Status::Connected) {
-            let screen = shared.parser.screen();
+        if focused && matches!(status, Status::Connected) {
+            let screen = parser.screen();
             let selected_text = self.selection.map(|(a, b)| {
                 let (start, end) = if a <= b { (a, b) } else { (b, a) };
                 screen.contents_between(start.0, start.1, end.0, end.1 + 1)
@@ -114,7 +110,7 @@ impl TerminalView {
                 }
             }
             if !input.is_empty() {
-                shared.parser.screen_mut().set_scrollback(0);
+                parser.screen_mut().set_scrollback(0);
                 self.selection = None;
                 session.send(input);
             }
@@ -122,22 +118,10 @@ impl TerminalView {
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, BACKGROUND);
-        paint_screen(&painter, shared.parser.screen(), rect.min, (cell_w, cell_h), (rows, cols), self.selection, focused);
+        paint_screen(&painter, parser.screen(), rect.min, (cell_w, cell_h), (rows, cols), self.selection, focused);
+        drop(parser);
 
-        match &shared.status {
-            Status::Connecting => overlay_text(&painter, rect, "Verbinde …"),
-            Status::Connected => {}
-            Status::HostKey { fingerprint, algorithm } => {
-                let (fingerprint, algorithm) = (fingerprint.clone(), algorithm.clone());
-                drop(shared);
-                host_key_dialog(ui, rect, &fingerprint, &algorithm, session, &mut out);
-            }
-            Status::Closed(message) => {
-                let message = message.clone();
-                drop(shared);
-                closed_bar(ui, rect, &message, &mut out);
-            }
-        }
+        self.overlay.show(ui, rect, session.conn(), &status, &mut out);
         out
     }
 }
@@ -317,56 +301,6 @@ fn key_bytes(key: Key, modifiers: Modifiers, application_cursor: bool) -> Option
         _ => return None,
     };
     Some(seq.into_bytes())
-}
-
-fn overlay_text(painter: &egui::Painter, rect: Rect, text: &str) {
-    painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, FontId::proportional(16.0), FOREGROUND);
-}
-
-fn host_key_dialog(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    fingerprint: &str,
-    algorithm: &str,
-    session: &SshSession,
-    out: &mut TerminalResponse,
-) {
-    let area = Rect::from_center_size(rect.center(), Vec2::new(rect.width().min(560.0), 190.0));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area), |ui| {
-        egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.heading("Unbekannter Host-Key");
-            ui.label("Dieser Server ist noch nicht in ~/.ssh/known_hosts eingetragen. Vergleiche den Fingerabdruck mit dem des Servers, bevor du vertraust.");
-            ui.add_space(6.0);
-            ui.monospace(format!("{algorithm}\n{fingerprint}"));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Vertrauen & verbinden").clicked() {
-                    session.answer_host_key(true);
-                }
-                if ui.button("Abbrechen").clicked() {
-                    session.answer_host_key(false);
-                    out.close = true;
-                }
-            });
-        });
-    });
-}
-
-fn closed_bar(ui: &mut egui::Ui, rect: Rect, message: &str, out: &mut TerminalResponse) {
-    let bar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 36.0), rect.max);
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar), |ui| {
-        egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(message);
-                if ui.button("🔄 Neu verbinden").clicked() {
-                    out.reconnect = true;
-                }
-                if ui.button("Tab schließen").clicked() {
-                    out.close = true;
-                }
-            });
-        });
-    });
 }
 
 #[cfg(test)]

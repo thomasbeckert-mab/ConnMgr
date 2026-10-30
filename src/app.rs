@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use crate::askpass;
 use crate::crypto::Vault;
 use crate::launcher;
-use crate::model::{self, Connection, Credential, CredentialSource, Folder, Node, Protocol, Target};
+use crate::model::{self, Connection, Credential, CredentialSource, Folder, Node, Protocol, SecretField, Target};
 use crate::ssh::{self, ConnectParams, SshSession};
 use crate::store::{self, StoreFile};
 use crate::terminal::TerminalView;
@@ -55,6 +55,53 @@ struct Session {
     tabs: Vec<Tab>,
     /// `None` = Eigenschaften-Tab.
     active_tab: Option<usize>,
+    dialog: Option<Dialog>,
+}
+
+/// Modale Dialoge für Datei-Operationen.
+enum Dialog {
+    ChangeMaster { old: Zeroizing<String>, new: Zeroizing<String>, confirm: Zeroizing<String>, error: Option<String> },
+    /// `scope = None` exportiert alles.
+    Export { scope: Option<String>, password: Zeroizing<String>, confirm: Zeroizing<String>, error: Option<String> },
+    Import { path: PathBuf, password: Zeroizing<String>, error: Option<String> },
+}
+
+/// Effektive Zugangsdaten einer Verbindung, entschlüsselt.
+#[derive(Default)]
+struct Effective {
+    username: String,
+    password: Option<Zeroizing<String>>,
+    private_key: Option<Zeroizing<String>>,
+    passphrase: Option<Zeroizing<String>>,
+}
+
+/// Ergebnis der Schlüsselprüfung im Editor; wird nur bei Änderungen neu berechnet,
+/// weil das Entschlüsseln (bcrypt) teuer ist.
+#[derive(Clone)]
+enum KeyInfo {
+    None,
+    Valid { summary: String, public: String },
+    Encrypted,
+    Invalid(String),
+}
+
+fn inspect_key(pem: &str, passphrase: &str) -> KeyInfo {
+    use russh::keys::{self, HashAlg};
+    if pem.trim().is_empty() {
+        return KeyInfo::None;
+    }
+    match keys::decode_secret_key(pem, Some(passphrase).filter(|p| !p.is_empty())) {
+        Ok(key) => {
+            let public = key.public_key();
+            KeyInfo::Valid {
+                summary: format!("{} · {}", public.algorithm(), public.fingerprint(HashAlg::Sha256)),
+                public: public.to_openssh().unwrap_or_default(),
+            }
+        }
+        Err(keys::Error::KeyIsEncrypted) => KeyInfo::Encrypted,
+        Err(_) if !passphrase.is_empty() => KeyInfo::Invalid("Passphrase falsch oder Schlüssel ungültig".into()),
+        Err(e) => KeyInfo::Invalid(e.to_string()),
+    }
 }
 
 struct Tab {
@@ -102,6 +149,11 @@ enum EditorBody {
         username: String,
         password: Zeroizing<String>,
         show_password: bool,
+        private_key: Zeroizing<String>,
+        passphrase: Zeroizing<String>,
+        show_key: bool,
+        /// Hash von Schlüssel und Passphrase zum zuletzt geprüften Ergebnis.
+        key_info: Option<(u64, KeyInfo)>,
     },
 }
 
@@ -120,9 +172,15 @@ impl Editor {
                 show_password: false,
                 favorite: false,
             },
-            Kind::Credential => {
-                EditorBody::Credential { username: String::new(), password: Zeroizing::default(), show_password: false }
-            }
+            Kind::Credential => EditorBody::Credential {
+                username: String::new(),
+                password: Zeroizing::default(),
+                show_password: false,
+                private_key: Zeroizing::default(),
+                passphrase: Zeroizing::default(),
+                show_key: false,
+                key_info: None,
+            },
         };
         Self { id: None, parent, name: String::new(), icon: String::new(), color: None, body }
     }
@@ -152,6 +210,12 @@ impl Editor {
                     username: c.username.clone(),
                     password: store::decrypt_secret(&s.vault, &c.id, c.password.as_ref())?.unwrap_or_default(),
                     show_password: false,
+                    private_key: store::decrypt_field(&s.vault, &c.id, SecretField::PrivateKey, c.private_key.as_ref())?
+                        .unwrap_or_default(),
+                    passphrase: store::decrypt_field(&s.vault, &c.id, SecretField::Passphrase, c.passphrase.as_ref())?
+                        .unwrap_or_default(),
+                    show_key: false,
+                    key_info: None,
                 },
             ),
         };
@@ -191,6 +255,10 @@ enum Action {
     ActivateTab(Option<usize>),
     CloseTab(usize),
     Reconnect(usize),
+    OpenDialog(Dialog),
+    CloseDialog,
+    /// Führt den offenen Dialog aus.
+    SubmitDialog,
     ToggleExpanded(String),
     ToggleFavorite(String),
     Move(String, Target),
@@ -276,6 +344,7 @@ impl ConMgrApp {
                     confirm_delete: false,
                     tabs: Vec::new(),
                     active_tab: None,
+                    dialog: None,
                 }));
             }
             Err(e) => {
@@ -298,7 +367,7 @@ impl ConMgrApp {
     fn connect(&mut self, id: &str) -> Result<()> {
         let session = self.session()?;
         let conn = model::find_connection(&session.store.items, id).ok_or_else(|| anyhow!("Verbindung nicht gefunden"))?.clone();
-        let (username, password) = session.credentials_for(&conn)?;
+        let Effective { username, password, .. } = session.credentials_for(&conn)?;
         let ssh_env = match (&password, conn.protocol) {
             (Some(pw), Protocol::Ssh | Protocol::Sftp) => self.askpass()?.issue(pw.clone())?,
             _ => Vec::new(),
@@ -318,7 +387,7 @@ impl ConMgrApp {
         let State::Unlocked(session) = &mut self.state else { bail!("Gesperrt") };
         let node = model::find(&session.store.items, id).ok_or_else(|| anyhow!("Verbindung nicht gefunden"))?;
         let Node::Connection(conn) = node else { bail!("Kein Verbindungseintrag") };
-        let (username, password) = session.credentials_for(conn)?;
+        let Effective { username, password, private_key, passphrase } = session.credentials_for(conn)?;
         model::validate_host(&conn.host).map_err(|e| anyhow!(e))?;
         model::validate_username(&username).map_err(|e| anyhow!(e))?;
 
@@ -330,7 +399,7 @@ impl ConMgrApp {
             session: SshSession::start(
                 &runtime,
                 ctx.clone(),
-                ConnectParams { host: conn.host.clone(), port: conn.port, username, password, cols: 80, rows: 24 },
+                ConnectParams { host: conn.host.clone(), port: conn.port, username, password, private_key, passphrase },
             ),
             view: TerminalView::default(),
         };
@@ -368,7 +437,7 @@ impl ConMgrApp {
     fn copy_password(&mut self, id: &str) -> Result<()> {
         let session = self.session()?;
         let password = match model::find(&session.store.items, id) {
-            Some(Node::Connection(c)) => session.credentials_for(c)?.1,
+            Some(Node::Connection(c)) => session.credentials_for(c)?.password,
             Some(Node::Credential(c)) => store::decrypt_secret(&session.vault, &c.id, c.password.as_ref())?,
             _ => bail!("Eintrag hat kein Passwort"),
         };
@@ -493,6 +562,15 @@ impl Session {
                 Ok(Some("Verschoben".into()))
             }
             Action::Duplicate(id) => self.duplicate(&id, path).map(Some),
+            Action::OpenDialog(dialog) => {
+                self.dialog = Some(dialog);
+                Ok(None)
+            }
+            Action::CloseDialog => {
+                self.dialog = None;
+                Ok(None)
+            }
+            Action::SubmitDialog => self.submit_dialog(path),
             Action::Unlock
             | Action::Lock
             | Action::Connect(_)
@@ -509,11 +587,17 @@ impl Session {
         Ok(())
     }
 
-    fn credentials_for(&self, conn: &Connection) -> Result<(String, Option<Zeroizing<String>>)> {
-        match model::resolve(&self.store.items, conn).map_err(|e| anyhow!(e))? {
-            Some(r) => Ok((r.username.to_owned(), store::decrypt_secret(&self.vault, r.aad, r.password)?)),
-            None => Ok((String::new(), None)),
-        }
+    fn credentials_for(&self, conn: &Connection) -> Result<Effective> {
+        let Some(r) = model::resolve(&self.store.items, conn).map_err(|e| anyhow!(e))? else {
+            return Ok(Effective::default());
+        };
+        let decrypt = |field, enc| store::decrypt_field(&self.vault, r.owner_id, field, enc);
+        Ok(Effective {
+            username: r.username.to_owned(),
+            password: decrypt(SecretField::Password, r.password)?,
+            private_key: decrypt(SecretField::PrivateKey, r.private_key)?,
+            passphrase: decrypt(SecretField::Passphrase, r.passphrase)?,
+        })
     }
 
     fn save(&mut self, path: &Path) -> Result<String> {
@@ -568,14 +652,23 @@ impl Session {
                     favorite: *favorite,
                 })
             }
-            EditorBody::Credential { username, password, .. } => {
+            EditorBody::Credential { username, password, private_key, passphrase, .. } => {
                 let username = username.trim().to_owned();
                 model::validate_username(&username).map_err(|e| anyhow!(e))?;
+                if let KeyInfo::Invalid(e) = inspect_key(private_key, passphrase) {
+                    bail!("SSH-Schlüssel: {e}");
+                }
+                let mut key = private_key.trim().to_owned();
+                if !key.is_empty() {
+                    key.push('\n');
+                }
                 Node::Credential(Credential {
                     id: id.clone(),
                     name: name.clone(),
                     username,
-                    password: store::encrypt_secret(&self.vault, &id, password)?,
+                    password: store::encrypt_field(&self.vault, &id, SecretField::Password, password)?,
+                    private_key: store::encrypt_field(&self.vault, &id, SecretField::PrivateKey, &Zeroizing::new(key))?,
+                    passphrase: store::encrypt_field(&self.vault, &id, SecretField::Passphrase, passphrase)?,
                     icon,
                     color,
                 })
@@ -610,38 +703,94 @@ impl Session {
         Ok(format!("„{}“ gelöscht", removed.name()))
     }
 
-    /// Kopiert Verbindung oder Zugangsdaten; das Passwort wird für die neue ID neu verschlüsselt.
+    /// Kopiert einen Eintrag samt Inhalt; Geheimnisse werden für die neuen IDs neu verschlüsselt.
     fn duplicate(&mut self, id: &str, path: &Path) -> Result<String> {
-        let node = model::find(&self.store.items, id).cloned().ok_or_else(|| anyhow!("Eintrag nicht gefunden"))?;
-        let copy_id = new_id();
-        let reencrypt = |old_id: &str, enc: Option<&crate::crypto::Encrypted>| -> Result<_> {
-            match store::decrypt_secret(&self.vault, old_id, enc)? {
-                Some(pw) => store::encrypt_secret(&self.vault, &copy_id, &pw),
-                None => Ok(None),
-            }
-        };
-        let copy = match node {
-            Node::Connection(mut c) => {
-                c.password = reencrypt(&c.id, c.password.as_ref())?;
-                c.id = copy_id.clone();
-                c.name = format!("{} (Kopie)", c.name);
-                Node::Connection(c)
-            }
-            Node::Credential(mut c) => {
-                c.password = reencrypt(&c.id, c.password.as_ref())?;
-                c.id = copy_id.clone();
-                c.name = format!("{} (Kopie)", c.name);
-                Node::Credential(c)
-            }
-            Node::Folder(_) => bail!("Ordner können nicht dupliziert werden"),
-        };
-        let name = copy.name().to_owned();
+        let node = model::find(&self.store.items, id).ok_or_else(|| anyhow!("Eintrag nicht gefunden"))?;
+        let mut copy = store::copy_subtree(node, &self.vault, &self.vault)?;
+        let name = format!("{} (Kopie)", copy.name());
+        *copy.name_mut() = name.clone();
+        let copy_id = copy.id().to_owned();
         if let Err(copy) = model::insert(&mut self.store.items, &Target::After(id.to_owned()), copy) {
             self.store.items.push(copy);
         }
         self.store.save(path)?;
         self.select(&copy_id)?;
         Ok(format!("„{name}“ angelegt"))
+    }
+
+    fn submit_dialog(&mut self, path: &Path) -> Result<Option<String>> {
+        let Some(dialog) = &mut self.dialog else { return Ok(None) };
+        let outcome = match dialog {
+            Dialog::ChangeMaster { old, new, confirm, .. } => {
+                if self.store.unlock(old).is_err() {
+                    Err(anyhow!("Das bisherige Master-Passwort ist falsch"))
+                } else if new.chars().count() < MIN_MASTER_LEN {
+                    Err(anyhow!("Das neue Master-Passwort muss mindestens {MIN_MASTER_LEN} Zeichen lang sein"))
+                } else if **new != **confirm {
+                    Err(anyhow!("Die neuen Passwörter stimmen nicht überein"))
+                } else {
+                    let mut store = self.store.clone();
+                    store.change_master(&self.vault, new).and_then(|vault| {
+                        store.save(path)?;
+                        self.store = store;
+                        self.vault = vault;
+                        Ok("Master-Passwort geändert".to_owned())
+                    })
+                }
+            }
+            Dialog::Export { scope, password, confirm, .. } => {
+                let nodes: Vec<Node> = match scope {
+                    Some(id) => model::find(&self.store.items, id).cloned().into_iter().collect(),
+                    None => self.store.items.clone(),
+                };
+                if password.chars().count() < MIN_MASTER_LEN {
+                    Err(anyhow!("Das Export-Passwort muss mindestens {MIN_MASTER_LEN} Zeichen lang sein"))
+                } else if **password != **confirm {
+                    Err(anyhow!("Die Passwörter stimmen nicht überein"))
+                } else {
+                    let default_name = match nodes.as_slice() {
+                        [single] if scope.is_some() => format!("{}.conmgr.json", single.name()),
+                        _ => "conmgr-export.conmgr.json".to_owned(),
+                    };
+                    match rfd::FileDialog::new().set_file_name(default_name).add_filter("ConMgr", &["json"]).save_file() {
+                        None => return Ok(None),
+                        Some(target) => StoreFile::export(&nodes, &self.vault, password, &target)
+                            .map(|()| format!("{} Einträge nach {} exportiert", nodes.iter().map(model::count).sum::<usize>(), target.display())),
+                    }
+                }
+            }
+            Dialog::Import { path: source, password, .. } => StoreFile::import(source, password, &self.vault).and_then(|items| {
+                let name = source.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".conmgr").to_owned()).unwrap_or_default();
+                let count: usize = items.iter().map(model::count).sum();
+                let folder = Node::Folder(Folder {
+                    id: new_id(),
+                    name: format!("Import {name}"),
+                    icon: None,
+                    color: None,
+                    credential_id: None,
+                    expanded: true,
+                    children: items,
+                });
+                self.store.items.push(folder);
+                model::drop_dangling_references(&mut self.store.items);
+                self.store.save(path)?;
+                Ok(format!("{count} Einträge importiert"))
+            }),
+        };
+        match outcome {
+            Ok(message) => {
+                self.dialog = None;
+                Ok(Some(message))
+            }
+            Err(e) => {
+                if let Some(Dialog::ChangeMaster { error, .. } | Dialog::Export { error, .. } | Dialog::Import { error, .. }) =
+                    &mut self.dialog
+                {
+                    *error = Some(e.to_string());
+                }
+                Ok(None)
+            }
+        }
     }
 
     /// Zielordner für neue Einträge: der ausgewählte Ordner bzw. der Ordner des ausgewählten Eintrags.
@@ -738,6 +887,18 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                 if ui.button("🔒 Sperren").clicked() {
                     action = Some(Action::Lock);
                 }
+                ui.menu_button("☰", |ui| {
+                    menu_item(ui, "Master-Passwort ändern …", &mut action, || Action::OpenDialog(Dialog::change_master()));
+                    ui.separator();
+                    menu_item(ui, "Alles exportieren …", &mut action, || Action::OpenDialog(Dialog::export(None)));
+                    if ui.button("Importieren …").clicked() {
+                        ui.close_menu();
+                        let picked = rfd::FileDialog::new().set_title("ConMgr-Datei importieren").add_filter("ConMgr", &["json"]).pick_file();
+                        if let Some(path) = picked {
+                            action = Some(Action::OpenDialog(Dialog::Import { path, password: Zeroizing::default(), error: None }));
+                        }
+                    }
+                });
             });
         });
         ui.add_space(2.0);
@@ -795,7 +956,87 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         });
     });
 
+    if let Some(dialog) = &mut s.dialog {
+        dialog_ui(ctx, dialog, &mut action);
+    }
+
     action
+}
+
+impl Dialog {
+    fn change_master() -> Self {
+        Dialog::ChangeMaster { old: Zeroizing::default(), new: Zeroizing::default(), confirm: Zeroizing::default(), error: None }
+    }
+
+    fn export(scope: Option<String>) -> Self {
+        Dialog::Export { scope, password: Zeroizing::default(), confirm: Zeroizing::default(), error: None }
+    }
+}
+
+fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, action: &mut Option<Action>) {
+    let (title, hint) = match dialog {
+        Dialog::ChangeMaster { .. } => ("Master-Passwort ändern", "Alle Passwörter und Schlüssel werden mit dem neuen Master-Passwort neu verschlüsselt."),
+        Dialog::Export { scope: Some(_), .. } => ("Exportieren", "Der Eintrag wird samt Inhalt in eine eigene Datei mit eigenem Passwort geschrieben."),
+        Dialog::Export { scope: None, .. } => ("Alles exportieren", "Alle Einträge werden in eine eigene Datei mit eigenem Passwort geschrieben."),
+        Dialog::Import { .. } => ("Importieren", "Die Einträge landen in einem neuen Ordner „Import …“."),
+    };
+    let mut open = true;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(hint);
+            ui.add_space(8.0);
+            let mut enter = false;
+            let mut field = |ui: &mut egui::Ui, label: &str, value: &mut Zeroizing<String>| {
+                ui.label(label);
+                let r = ui.add(egui::TextEdit::singleline(&mut **value).password(true).desired_width(260.0));
+                enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.end_row();
+            };
+            let error = egui::Grid::new("dialog").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| match dialog {
+                Dialog::ChangeMaster { old, new, confirm, error } => {
+                    field(ui, "Bisheriges", old);
+                    field(ui, "Neues", new);
+                    field(ui, "Wiederholen", confirm);
+                    error.clone()
+                }
+                Dialog::Export { password, confirm, error, .. } => {
+                    field(ui, "Export-Passwort", password);
+                    field(ui, "Wiederholen", confirm);
+                    error.clone()
+                }
+                Dialog::Import { path, password, error } => {
+                    ui.label("Datei");
+                    ui.label(path.display().to_string());
+                    ui.end_row();
+                    field(ui, "Passwort der Datei", password);
+                    error.clone()
+                }
+            });
+            if let Some(error) = error.inner {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let ok = match dialog {
+                    Dialog::Export { .. } => "Speichern unter …",
+                    Dialog::Import { .. } => "Importieren",
+                    Dialog::ChangeMaster { .. } => "Ändern",
+                };
+                if ui.button(ok).clicked() || enter {
+                    *action = Some(Action::SubmitDialog);
+                }
+                if ui.button("Abbrechen").clicked() {
+                    *action = Some(Action::CloseDialog);
+                }
+            });
+        });
+    if !open {
+        *action = Some(Action::CloseDialog);
+    }
 }
 
 fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
@@ -804,9 +1045,11 @@ fn tab_bar(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
     }
     for (index, tab) in s.tabs.iter().enumerate() {
         ui.separator();
-        let (dot, dot_color) = match tab.session.lock().status {
+        let (dot, dot_color) = match tab.session.conn().status() {
             ssh::Status::Connected => ("●", Color32::from_rgb(0x23, 0xd1, 0x8b)),
-            ssh::Status::Connecting | ssh::Status::HostKey { .. } => ("●", Color32::from_rgb(0xf5, 0xb0, 0x41)),
+            ssh::Status::Connecting | ssh::Status::HostKey { .. } | ssh::Status::Prompt { .. } => {
+                ("●", Color32::from_rgb(0xf5, 0xb0, 0x41))
+            }
             ssh::Status::Closed(_) => ("○", ui.visuals().weak_text_color()),
         };
         ui.colored_label(dot_color, dot);
@@ -947,11 +1190,9 @@ impl TreeView<'_> {
                     menu_item(ui, "📋 Passwort kopieren", action, || Action::CopyPassword(id.to_owned()));
                     let fav = if c.favorite { "☆ Kein Favorit mehr" } else { "⭐ Als Favorit" };
                     menu_item(ui, fav, action, || Action::ToggleFavorite(id.to_owned()));
-                    menu_item(ui, "Duplizieren", action, || Action::Duplicate(id.to_owned()));
                 }
                 Node::Credential(_) => {
                     menu_item(ui, "📋 Passwort kopieren", action, || Action::CopyPassword(id.to_owned()));
-                    menu_item(ui, "Duplizieren", action, || Action::Duplicate(id.to_owned()));
                 }
                 Node::Folder(_) => {}
             }
@@ -962,6 +1203,8 @@ impl TreeView<'_> {
             new_menu_items(ui, new_parent, action);
             ui.separator();
             menu_item(ui, "✏ Bearbeiten", action, || Action::Edit(id.to_owned()));
+            menu_item(ui, "Duplizieren", action, || Action::Duplicate(id.to_owned()));
+            menu_item(ui, "Exportieren …", action, || Action::OpenDialog(Dialog::export(Some(id.to_owned()))));
             menu_item(ui, "🗑 Löschen", action, || Action::AskDelete(id.to_owned()));
         });
     }
@@ -1087,8 +1330,9 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete:
                 ui.checkbox(favorite, "⭐");
                 ui.end_row();
             }
-            EditorBody::Credential { username, password, show_password } => {
+            EditorBody::Credential { username, password, show_password, private_key, passphrase, show_key, key_info } => {
                 username_password_rows(ui, username, password, show_password);
+                key_rows(ui, private_key, passphrase, show_key, key_info);
             }
         }
 
@@ -1154,6 +1398,70 @@ fn editor_ui(ui: &mut egui::Ui, ed: &mut Editor, items: &[Node], confirm_delete:
     }
 }
 
+fn key_rows(
+    ui: &mut egui::Ui,
+    private_key: &mut Zeroizing<String>,
+    passphrase: &mut Zeroizing<String>,
+    show_key: &mut bool,
+    key_info: &mut Option<(u64, KeyInfo)>,
+) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (private_key.as_str(), passphrase.as_str()).hash(&mut hasher);
+    let hash = hasher.finish();
+    if key_info.as_ref().is_none_or(|(h, _)| *h != hash) {
+        *key_info = Some((hash, inspect_key(private_key, passphrase)));
+    }
+    let info = key_info.as_ref().map(|(_, i)| i.clone()).unwrap_or(KeyInfo::None);
+
+    ui.label("SSH-Schlüssel");
+    ui.vertical(|ui| {
+        match &info {
+            KeyInfo::None => ui.weak("Kein Schlüssel hinterlegt"),
+            KeyInfo::Valid { summary, .. } => ui.label(format!("🔑 {summary}")),
+            KeyInfo::Encrypted => ui.label("🔒 Verschlüsselt — Passphrase eintragen oder beim Verbinden eingeben"),
+            KeyInfo::Invalid(e) => ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {e}")),
+        };
+        ui.horizontal(|ui| {
+            if ui.button("Aus Datei laden …").clicked() {
+                let mut picker = rfd::FileDialog::new().set_title("Privaten SSH-Schlüssel wählen");
+                if let Some(dirs) = directories::BaseDirs::new() {
+                    picker = picker.set_directory(dirs.home_dir().join(".ssh"));
+                }
+                if let Some(text) = picker.pick_file().and_then(|path| std::fs::read_to_string(path).ok()) {
+                    **private_key = text;
+                }
+            }
+            if !private_key.is_empty() {
+                ui.checkbox(show_key, "Text anzeigen");
+                if ui.button("Entfernen").clicked() {
+                    private_key.clear();
+                    passphrase.clear();
+                }
+            }
+            if let KeyInfo::Valid { public, .. } = &info {
+                if ui.button("📋 Öffentlichen Schlüssel kopieren").on_hover_text("Für ~/.ssh/authorized_keys auf dem Server").clicked() {
+                    ui.ctx().copy_text(public.clone());
+                }
+            }
+        });
+        if *show_key || private_key.is_empty() {
+            ui.add(
+                egui::TextEdit::multiline(&mut **private_key)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(3)
+                    .desired_width(420.0)
+                    .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----  (einfügen oder aus Datei laden)"),
+            );
+        }
+    });
+    ui.end_row();
+
+    ui.label("Passphrase");
+    ui.add(egui::TextEdit::singleline(&mut **passphrase).password(true).desired_width(220.0).hint_text("optional"));
+    ui.end_row();
+}
+
 fn username_password_rows(ui: &mut egui::Ui, username: &mut String, password: &mut Zeroizing<String>, show: &mut bool) {
     ui.label("Benutzer");
     ui.add(egui::TextEdit::singleline(username).desired_width(300.0));
@@ -1214,6 +1522,7 @@ mod tests {
             confirm_delete: false,
             tabs: Vec::new(),
             active_tab: None,
+            dialog: None,
         }
     }
 
@@ -1253,9 +1562,16 @@ mod tests {
         let session = SshSession::start(
             runtime.handle(),
             ctx.clone(),
-            ConnectParams { host: "127.0.0.1".into(), port: 1, username: "x".into(), password: None, cols: 80, rows: 24 },
+            ConnectParams {
+                host: "127.0.0.1".into(),
+                port: 1,
+                username: "x".into(),
+                password: None,
+                private_key: None,
+                passphrase: None,
+            },
         );
-        session.lock().parser.process(b"\x1b[1;31mrot\x1b[0m \x1b[7minvers\x1b[0m \xe4\xb8\xad\xe6\x96\x87\r\n");
+        session.parser().process(b"\x1b[1;31mrot\x1b[0m \x1b[7minvers\x1b[0m \xe4\xb8\xad\xe6\x96\x87\r\n");
         s.tabs.push(Tab {
             conn_id: "web01".into(),
             title: "web01".into(),
@@ -1271,14 +1587,14 @@ mod tests {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 session_ui(ctx, &mut s, "Status", Path::new("test.json"));
             });
-            if let ssh::Status::Closed(msg) = &s.tabs[0].session.lock().status {
+            if let ssh::Status::Closed(msg) = &s.tabs[0].session.conn().status() {
                 assert!(msg.starts_with("Fehler"), "{msg}");
                 break;
             }
             assert!(Instant::now() < deadline, "Verbindung wurde nicht beendet");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_ne!(s.tabs[0].session.lock().parser.screen().size(), (24, 80), "Terminal passt sich der Fläche an");
+        assert_ne!(s.tabs[0].session.parser().screen().size(), (24, 80), "Terminal passt sich der Fläche an");
 
         s.apply(Action::CloseTab(0), Path::new("unused.json")).unwrap();
         assert!(s.tabs.is_empty());
@@ -1302,14 +1618,14 @@ mod tests {
         assert_eq!(model::parent_id(&s.store.items, &id).as_deref(), Some("db"));
         let c = model::find_connection(&s.store.items, &id).unwrap().clone();
         assert_eq!(c.credentials, CredentialSource::Inherit);
-        assert_eq!(s.credentials_for(&c).unwrap().0, "root", "erbt von Production");
+        assert_eq!(s.credentials_for(&c).unwrap().username, "root", "erbt von Production");
 
         s.apply(Action::Duplicate("admin".into()), &path).unwrap();
         assert_eq!(model::credentials(&s.store.items).len(), 2);
 
         s.apply(Action::Delete("admin".into()), &path).unwrap();
         let web01 = model::find_connection(&s.store.items, "web01").unwrap().clone();
-        assert_eq!(s.credentials_for(&web01).unwrap().0, "", "Verweis entfernt");
+        assert_eq!(s.credentials_for(&web01).unwrap().username, "", "Verweis entfernt");
 
         std::fs::remove_dir_all(dir).unwrap();
     }

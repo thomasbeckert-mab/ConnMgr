@@ -3,6 +3,7 @@
 mod app;
 mod askpass;
 mod crypto;
+mod dialogs;
 mod launcher;
 mod model;
 mod ssh;
