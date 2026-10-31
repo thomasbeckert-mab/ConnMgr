@@ -1,55 +1,55 @@
-<p align="center"><img src="assets/logo.svg" width="128" alt="ConnMgr-Logo"></p>
+<p align="center"><img src="assets/logo.svg" width="128" alt="ConnMgr logo"></p>
 
 # ConnMgr
 
-Plattformübergreifender Verbindungsmanager (macOS, Linux, Windows) für **SSH, SFTP, RDP und VNC**, geschrieben in Rust mit [egui/eframe](https://github.com/emilk/egui). Oberfläche auf **Deutsch und Englisch**, hell, dunkel oder wie das Betriebssystem.
+Cross-platform connection manager (macOS, Linux, Windows) for **SSH, SFTP, RDP, VNC and Omnissa Horizon**, written in Rust with [egui/eframe](https://github.com/emilk/egui). The UI is available in **English and German**, in light or dark mode or following the operating system.
 
-## Bauen & Starten
+## Build & run
 
 ```bash
-cargo run --release                     # Standard-Speicherort
-cargo run --release -- ./meine.json     # eigene Verbindungsdatei
+cargo run --release                     # default location
+cargo run --release -- ./my.json        # custom connection file
 cargo test
 ```
 
-### macOS: als App bauen
+### macOS: build as an app
 
-Unter macOS braucht ConnMgr für Verbindungen ins lokale Netz die Berechtigung **„Lokales Netzwerk“**. Mit `cargo run` aus einem fremden Terminal (z. B. dem einer IDE) gilt dessen Berechtigung, und Verbindungen zu `192.168.x.x` scheitern mit „No route to host“. Deshalb als eigene App bauen und starten:
+On macOS, ConnMgr needs the **"Local Network"** permission to connect to hosts on the local network. When started with `cargo run` from another app's terminal (e.g. an IDE), that app's permission applies, and connections to `192.168.x.x` fail with "No route to host". So build and launch it as its own app:
 
 ```bash
 ./scripts/bundle-macos.sh
 open target/release/bundle/ConnMgr.app
 ```
 
-Beim ersten Verbinden fragt macOS einmal nach; die Freigabe lässt sich unter *Systemeinstellungen → Datenschutz & Sicherheit → Lokales Netzwerk* ändern.
+macOS asks once on the first connection; the permission can be changed under *System Settings → Privacy & Security → Local Network*.
 
-Damit die Freigabe über Neubauten erhalten bleibt, einmalig ein lokales Signatur-Zertifikat anlegen (selbst signiert, nur für `codesign`, im Anmelde-Schlüsselbund):
+To keep the permission across rebuilds, create a local code-signing certificate once (self-signed, for `codesign` only, stored in the login keychain):
 
 ```bash
 ./scripts/create-signing-cert-macos.sh
 ```
 
-`bundle-macos.sh` signiert dann damit; ohne Zertifikat signiert es ad-hoc, und macOS verwirft die Freigabe bei jedem Neubau.
+`bundle-macos.sh` then signs with it. Without the certificate it signs ad hoc, and macOS drops the permission on every rebuild.
 
-### Umbenennung ConMgr → ConnMgr
+### Rename ConMgr → ConnMgr
 
-Bis Oktober 2026 hieß die App „ConMgr“. Beim ersten Start übernimmt ConnMgr den alten Datenordner (`…/ConMgr` → `…/ConnMgr`) samt Verbindungsdatei und gemerkten RDP-Zertifikaten. Unverändert bleiben bewusst die macOS-Bundle-Kennung `app.conmgr.ConMgr` (an ihr hängt die Freigabe „Lokales Netzwerk“), der Name des Signatur-Zertifikats und der interne Prüftext des Master-Passworts.
+Until October 2026 the app was called "ConMgr". On first start, ConnMgr takes over the old data folder (`…/ConMgr` → `…/ConnMgr`) including the connection file and remembered RDP certificates. Deliberately unchanged: the macOS bundle identifier `app.conmgr.ConMgr` (the "Local Network" permission is tied to it), the name of the signing certificate, and the internal verifier text of the master password.
 
 ### Logo
 
-`assets/logo.svg` (mit runden Ecken) zeigt die App auf dem Sperrbildschirm und als Hintergrund, solange keine Sitzung offen ist, und erzeugt daraus das Fenster-Icon. Für das macOS-App-Icon gibt es `assets/icon-macos.svg`: dasselbe Motiv **randlos und ohne eigene Ecken**, denn seit macOS 26 schneidet das System die Form selbst zu und stellt Icons mit Rand verkleinert auf einer Kachel dar. `bundle-macos.sh` rendert es mit `cargo run --example render_icon` in ein Iconset und baut daraus `AppIcon.icns`. Beide Dateien bei Änderungen am Motiv gemeinsam anpassen.
+`assets/logo.svg` (with rounded corners) is shown on the lock screen and as the background while no session is open, and is also rendered into the window icon. The macOS app icon uses `assets/icon-macos.svg`: the same motif **full-bleed and without its own corners**, because since macOS 26 the system applies the shape mask itself and shows icons with a margin shrunk onto a tile. `bundle-macos.sh` renders it into an iconset with `cargo run --example render_icon` and builds `AppIcon.icns` from it. Update both files together when the motif changes.
 
-## Verbindungsdatei
+## Connection file
 
-Standardpfad:
+Default path:
 
-| OS      | Pfad |
+| OS      | Path |
 |---------|------|
 | macOS   | `~/Library/Application Support/ConnMgr/connections.json` |
 | Linux   | `~/.config/connmgr/connections.json` |
 | Windows | `%APPDATA%\ConnMgr\config\connections.json` |
 
-Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüsselt. Die Einträge bilden einen Baum aus Ordnern, Verbindungen und Zugangsdaten (Format 2; Dateien im alten Format 1 werden beim Öffnen automatisch übernommen):
+Readable JSON. Only passwords, keys and passphrases are encrypted. Entries form a tree of folders, connections and credentials (format 2; files in the old format 1 are migrated automatically when opened):
 
 ```json
 {
@@ -70,111 +70,143 @@ Lesbares JSON – nur Passwörter, Schlüssel und Passphrasen sind verschlüssel
 }
 ```
 
-## Bedienung
+## Usage
 
-- **Baum** links: **Doppelklick auf eine Verbindung verbindet** (ein Klick markiert) – ist schon ein Tab offen, wechselt ConnMgr dorthin („Weitere Sitzung öffnen“ im Kontextmenü öffnet eine zusätzliche). **Rechtsklick** öffnet das Kontextmenü mit Eigenschaften, Duplizieren, Exportieren und Löschen. Ein Klick auf Ordner oder Zugangsdaten markiert nur; der **Eigenschaften-Tab** öffnet sich ausschließlich über „📝 Eigenschaften“ (oder beim Anlegen) und lässt sich mit ✖ schließen. Ordner per Doppelklick auf-/zuklappen, Einträge per **Ziehen & Ablegen** verschieben (auf einen Ordner = hinein, auf einen Eintrag = davor, auf die freie Fläche = oberste Ebene).
-- **⚡ Schnellverbindung** (Feld in der Werkzeugleiste, `⌘K` / `Strg+K`): Adresse eintippen und Enter – z. B. `rdp://server`, `ssh://admin@host:2222`, `vnc://host:5901`, `admin@host`, `host:3389`, `[::1]:22`. Ohne Schema entscheidet der Port (3389 = RDP, 5900–5999 = VNC, sonst SSH). Passwort (bei RDP auch Benutzer) fragt der Tab ab. **💾** im Tab speichert die Verbindung in den Baum (in den markierten Ordner); **▾** zeigt die letzten zehn Adressen (ohne Passwörter).
-- **📌 Fixieren / automatisch ausblenden:** Nicht fixiert bleibt nur eine schmale Leiste (»); fährt die Maus darüber, schwebt der Baum über dem Inhalt ein und verschwindet beim Verlassen wieder – die Sitzung behält ihre Größe. Die Einstellung wird gespeichert.
-- **Löschen** fragt in einem Dialog nach; **Entf** (Mac: ⌘⌫) löscht den markierten Eintrag.
-- Die Statuszeile unten zeigt den Zustand der zuletzt gestarteten Verbindung und leert sich, wenn sie endet.
-- **Zugangsdaten** sind eigene Einträge mit Benutzer, Passwort und optional **privatem SSH-Schlüssel samt Passphrase** (aus Datei laden oder einfügen; Fingerabdruck und „Öffentlichen Schlüssel kopieren“). Eine Verbindung nutzt *eigene* Zugangsdaten, *bestimmte* gespeicherte oder *erbt* sie vom nächsten übergeordneten Ordner mit Zugangsdaten.
-- **Icons & Farben** pro Eintrag, **Favoriten** (⭐) mit Filter, **Suche** über Name, Host und Benutzer.
-- **Duplizieren** kopiert Einträge und ganze Ordner; Verweise auf mitkopierte Zugangsdaten zeigen danach auf die Kopien.
-- **Menü ☰:** *Master-Passwort ändern* (neues Salt, alle Geheimnisse umverschlüsselt), *Alles exportieren*, *Importieren*. Einzelne Einträge/Ordner exportiert das Kontextmenü. Exporte sind eigene, mit einem **eigenen Passwort** geschützte Dateien – gut zum Weitergeben. Importe landen in einem neuen Ordner „Import …“.
-- `⌘S` / `Strg+S` speichert den offenen Eintrag.
-- **⚙ Einstellungen** (Menü ☰): Sprache (wie System, Deutsch, English), Darstellung (wie System, Hell, Dunkel) und **Entsperren mit Touch ID**. Änderungen wirken sofort und werden in der Verbindungsdatei gespeichert – auch der Sperrbildschirm erscheint danach in Sprache und Design.
+- **Tree** (left):
+  - **Double-click a connection to connect**; a single click only selects it. If a tab for it is already open, ConnMgr switches to it ("Open another session" in the context menu opens an additional one).
+  - **Right-click** opens the context menu with Properties, Duplicate, Export and Delete.
+  - Clicking a folder or credential only selects it. The **properties tab** opens only via "📝 Properties" (or when creating an entry) and can be closed with ✖.
+  - Double-click a folder to expand/collapse it.
+  - Move entries by **drag & drop**: onto a folder = into it, onto an entry = before it, onto empty space = top level.
+- **⚡ Quick connect** (field in the toolbar, `⌘K` / `Ctrl+K`): type an address and press Enter, e.g. `rdp://server`, `ssh://admin@host:2222`, `vnc://host:5901`, `horizon://view.example.com`, `admin@host`, `host:3389`, `[::1]:22`.
+  - Without a scheme, the port decides: 3389 = RDP, 5900–5999 = VNC, anything else SSH.
+  - The tab asks for the password (for RDP also the user).
+  - **💾** in the tab saves the connection to the tree (into the selected folder).
+  - **▾** shows the last ten addresses (never passwords).
+- **📌 Pin / auto-hide:** When unpinned, only a narrow strip (») remains. Hovering over it slides the tree in over the content, and it disappears again when the mouse leaves, so the session keeps its size. The setting is saved.
+- **Delete** asks for confirmation in a dialog; **Del** (Mac: ⌘⌫) deletes the selected entry.
+- The status bar at the bottom shows the state of the most recently started connection and clears when it ends.
+- **Credentials** are separate entries with a user, a password and optionally a **private SSH key with passphrase**. The key can be loaded from a file or pasted; ConnMgr shows its fingerprint and offers "Copy public key".
+  - A connection uses *its own* credentials or a *specific* stored credential.
+  - It can also *inherit* credentials from the nearest parent folder that has them.
+- **Icons & colors** per entry, **favorites** (⭐) with a filter, **search** across name, host and user.
+- **Duplicate** copies entries and whole folders; references to credentials copied along with them then point to the copies.
+- **Menu ☰:**
+  - *Change master password*: new salt, all secrets re-encrypted.
+  - *Export everything* and *Import*. Single entries or folders are exported via the context menu.
+  - Exports are separate files protected by **their own password**, which makes them easy to share.
+  - Imports land in a new folder "Import …".
+- `⌘S` / `Ctrl+S` saves the open entry.
+- **⚙ Settings** (menu ☰): language (system, Deutsch, English), appearance (system, light, dark) and **unlock with Touch ID**. Changes take effect immediately and are saved in the connection file, so the lock screen also appears in the chosen language and theme.
 
-## Sitzungen in Tabs
+## Sessions in tabs
 
-Ein Doppelklick öffnet SSH, SFTP, RDP und VNC als Tab direkt in ConnMgr. „Extern“ bzw. das Kontextmenü startet stattdessen das Programm des Betriebssystems.
+A double-click opens SSH, SFTP, RDP and VNC as a tab directly in ConnMgr. "External" or the context menu launches the operating system's program instead. Horizon always runs in the Horizon Client (see below).
 
-### SSH-Terminal
+### SSH terminal
 
-Eingebautes Terminal (`xterm-256color`, 256 Farben/Truecolor). Markieren mit der Maus und `⌘C` kopiert, `⌘V` fügt ein (unter Windows/Linux `Strg+C` ohne Markierung = Abbruch-Signal). Mausrad blättert im Verlauf (5000 Zeilen); die Größe folgt dem Fenster.
+Built-in terminal (`xterm-256color`, 256 colors/truecolor).
+- **Copy and paste:** select with the mouse and press `⌘C` to copy; `⌘V` pastes. On Windows/Linux, `Ctrl+C` without a selection sends the interrupt signal.
+- **Scrollback:** the mouse wheel scrolls through 5000 lines of history.
+- **Size:** follows the window.
 
-**Anmeldung** in dieser Reihenfolge:
-1. privater Schlüssel aus den Zugangsdaten,
-2. **SSH-Agent** (`SSH_AUTH_SOCK`; unter Windows OpenSSH-Agent und Pageant),
-3. Standardschlüssel `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`,
-4. Passwort, dann Keyboard-Interactive.
+**Authentication** in this order:
+1. private key from the credentials,
+2. **SSH agent** (`SSH_AUTH_SOCK`; on Windows the OpenSSH agent and Pageant),
+3. default keys `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`,
+4. password, then keyboard-interactive.
 
-Fehlt eine **Passphrase** oder ein Passwort – oder wird das gespeicherte abgelehnt –, fragt ConnMgr im Tab nach. Akzeptiert der Server nur Schlüssel, gibt es eine klare Meldung statt einer Passwortabfrage.
+If a **passphrase** or password is missing, or the stored one is rejected, ConnMgr asks in the tab. If the server accepts only keys, you get a clear message instead of a password prompt.
 
-**Host-Keys** werden gegen `~/.ssh/known_hosts` geprüft (dieselbe Datei wie OpenSSH). Unbekannte Keys zeigt ConnMgr mit Fingerabdruck zur Bestätigung an; **geänderte Keys werden immer abgelehnt**.
+**Host keys** are checked against `~/.ssh/known_hosts` (the same file OpenSSH uses). ConnMgr shows unknown keys with their fingerprint for confirmation; **changed keys are always rejected**.
 
-### SFTP-Browser
+### SFTP browser
 
-Für SFTP-Verbindungen per Doppelklick, für SSH-Verbindungen über „📂 SFTP“. Gleiche Anmeldung wie das Terminal. Pfadleiste, Home, Aktualisieren; Doppelklick öffnet Ordner bzw. lädt Dateien herunter. **Hochladen** per Knopf oder **Drag & Drop aus Finder/Explorer**, Übertragungen mit Fortschritt laufen nebenher. Neuer Ordner, Umbenennen, Löschen (Ordner nur, wenn leer).
+Opened by double-clicking an SFTP connection, or via "📂 SFTP" for SSH connections. It uses the same authentication as the terminal.
+- **Navigation:** path bar, Home, Refresh. Double-click opens a folder or downloads a file.
+- **Upload:** via the button or by **drag & drop from Finder/Explorer**. Transfers run in the background with progress.
+- **File operations:** new folder, rename, delete (folders only when empty).
 
 ### RDP
 
-Über [IronRDP](https://github.com/Devolutions/IronRDP): TLS mit **NLA** (CredSSP/NTLM), Desktop in Tab-Größe (physische Pixel; auf Retina-Displays meldet ConnMgr Windows die passende Skalierung, z. B. 200 %). Maus inkl. Rad, Tastatur: Text geht als Unicode an den Server und ist damit unabhängig vom Tastaturlayout; Sondertasten und Kürzel als Scancodes (unter macOS wird ⌘ zu Strg, also ⌘C/⌘X/⌘V wie gewohnt).
+Via [IronRDP](https://github.com/Devolutions/IronRDP): TLS with **NLA** (CredSSP/NTLM).
+- **Display:** the desktop matches the tab size in physical pixels. On Retina displays, ConnMgr tells Windows the matching scaling, e.g. 200 %.
+- **Mouse:** including the wheel.
+- **Keyboard:** text is sent to the server as Unicode, so it works regardless of keyboard layout. Special keys and shortcuts are sent as scancodes. On macOS ⌘ becomes Ctrl, so ⌘C/⌘X/⌘V work as usual.
+- **Resizing:** when the tab size changes (window, sidebar), the Windows desktop adapts after half a second of rest (Display Control channel).
+- **Clipboard:** text in both directions. Text copied in Windows lands in the local clipboard, and text copied locally is ready to paste in Windows. Note: as with mstsc, the server sees everything you copy locally while the tab is connected.
 
-- **Größe:** Ändert sich der Tab (Fenster, Seitenleiste), passt sich der Windows-Desktop nach einer halben Sekunde Ruhe an (Display-Control-Kanal).
-- **Zwischenablage:** Text in beide Richtungen. In Windows Kopiertes landet in der Mac-Zwischenablage; auf dem Mac Kopiertes steht in Windows zum Einfügen bereit. Hinweis: Wie bei mstsc sieht der Server dabei alles, was du lokal kopierst, solange der Tab verbunden ist.
+Sign-in: user as `user`, `DOMAIN\user` or `user@domain`. If user or password is missing, the tab asks for it.
 
-Anmeldung: Benutzer als `benutzer`, `DOMÄNE\benutzer` oder `benutzer@domäne`; fehlen Benutzer oder Passwort, fragt der Tab nach.
+**Certificates:** RDP servers usually have self-signed certificates. If a certificate cannot be verified, ConnMgr shows its SHA-256 fingerprint for confirmation and remembers it in `rdp_certificates.json` (next to the connection file). **A changed certificate is rejected.** Delete its entry there if the server was intentionally given a new one.
 
-**Zertifikate:** RDP-Server haben meist selbst signierte Zertifikate. Lässt sich das Zertifikat nicht prüfen, zeigt ConnMgr den SHA-256-Fingerabdruck zur Bestätigung und merkt ihn sich in `rdp_certificates.json` (neben der Verbindungsdatei). **Ein geändertes Zertifikat wird abgelehnt** – Eintrag dort löschen, wenn der Server bewusst ein neues bekommen hat.
-
-Noch nicht: Kerberos, Smartcards, Sound, Laufwerksumleitung, Dateien/Bilder in der Zwischenablage, RD-Gateway.
+Not yet supported: Kerberos, smart cards, sound, drive redirection, files/images in the clipboard, RD Gateway.
 
 ### VNC
 
-Bild wird ins Fenster eingepasst; Maus (inkl. Rad) und Tastatur werden weitergegeben, `⌘V`/`Strg+V` tippt den Text der Zwischenablage auf der Gegenseite. Text aus der Zwischenablage des Servers wird übernommen. Kodierungen: ZRLE, CopyRect, Raw.
+- **Display:** the image is scaled to fit the window.
+- **Input:** mouse (including the wheel) and keyboard are forwarded.
+- **Clipboard:** `⌘V`/`Ctrl+V` types the clipboard text on the remote side, and text from the server's clipboard is taken over.
+- **Encodings:** ZRLE, CopyRect, Raw.
 
-Anmeldung: klassisches **VNC-Passwort** (aus den Zugangsdaten oder per Abfrage). Die macOS-Bildschirmfreigabe verlangt standardmäßig Apple-Anmeldung (ARD), die nicht unterstützt wird – dort *„VNC-Benutzer dürfen den Bildschirm mit Passwort steuern“* aktivieren oder extern öffnen.
+Authentication: classic **VNC password** (from the credentials or by prompt). macOS Screen Sharing requires Apple authentication (ARD) by default, which is not supported. Either enable *"VNC viewers may control screen with password"* there or open it externally.
 
 ### Omnissa Horizon
 
-Horizon-Desktops und -Apps laufen im **Omnissa Horizon Client** (Blast/PCoIP sind proprietär und lassen sich nicht einbetten). ConnMgr startet ihn über einen `horizon-client://`-Link nach der [Omnissa-Doku](https://docs.omnissa.com/HorizonClient-MacGuide-V2512/SyntaxforCreatingURIs):
+Horizon desktops and apps run in the **Omnissa Horizon Client**, because Blast and PCoIP are proprietary and cannot be embedded. ConnMgr launches it via a `horizon-client://` link, following the [Omnissa documentation](https://docs.omnissa.com/HorizonClient-MacGuide-V2512/SyntaxforCreatingURIs):
 
-- Felder: Connection Server, Port (Standard 443), **Desktop/App** (leer = Auswahl im Client), **Anzeigeprotokoll** (Standard, Blast, PCoIP).
-- Benutzer und Domäne kommen aus den Zugangsdaten (auch geerbt); `DOMÄNE\benutzer` wird zu Benutzer + `domainName`. Eine UPN (`benutzer@firma.de`) versteht der Link nicht – dann nur der Benutzerteil.
-- Ein Passwort lässt sich per Link bewusst nicht übergeben: Der Client fragt danach, ConnMgr legt es 30 s in die Zwischenablage.
-- Schnellverbindung: `horizon://view.firma.de/Finance Desktop`.
-- Start: macOS `open` (vorher Prüfung, ob der Horizon Client installiert ist), Windows URL-Handler, Linux `xdg-open`.
+- **Fields:**
+  - Connection Server and port (default 443).
+  - **Desktop/App**: leave empty to choose in the client.
+  - **Display protocol** (default, Blast, PCoIP): applies only when a desktop/app is set.
+- **User and domain** come from the credentials (inherited ones too). `DOMAIN\user` becomes user + `domainName`. The link does not understand a UPN (`user@example.com`), so only the user part is passed.
+- **Password:** deliberately not passed via the link. The client asks for it, and ConnMgr puts it on the clipboard for 30 s.
+- **Quick connect:** `horizon://view.example.com/Finance Desktop`.
+- **Launch:** macOS `open` (after checking that the Horizon Client is installed), Windows URL handler, Linux `xdg-open`.
 
-Beendete Sitzungen lassen sich im Tab neu verbinden. **Rechtsklick auf einen Tab:** Neu verbinden, Schließen, Andere schließen, Alle Verbindungen schließen. **Sperren trennt alle Sitzungen.**
+Ended sessions can be reconnected from the tab. **Right-click a tab** for: Reconnect, Close, Close others, Close all connections. **Locking disconnects all sessions.**
 
-### Tests gegen echte Server
+### Tests against real servers
 
-Die mit `#[ignore]` markierten Tests laufen gegen einen echten sshd. `HOME` muss auf ein Testverzeichnis zeigen (Schlüssel in `.ssh`, `known_hosts` wird dort angelegt; für den Passphrase-Test zusätzlich `enc_key` mit Passphrase `geheim123`):
+Tests marked `#[ignore]` run against a real sshd. `HOME` must point to a test directory: keys go in `.ssh`, and `known_hosts` is created there. The passphrase test additionally needs `enc_key` with the passphrase `geheim123`.
 
 ```bash
-CONNMGR_E2E_SSH_PORT=2222 HOME=/pfad/zum/test-home cargo test e2e -- --ignored --test-threads=1
+CONNMGR_E2E_SSH_PORT=2222 HOME=/path/to/test-home cargo test e2e -- --ignored --test-threads=1
 ```
 
-Der VNC-Test (eigener minimaler RFB-Server) und der RDP-Zertifikatstest (eigener Server bis einschließlich TLS) laufen bei `cargo test` immer.
+The VNC test (with its own minimal RFB server) and the RDP certificate test (with its own server up to and including TLS) always run with `cargo test`.
 
-## Entsperren mit Touch ID (macOS)
+## Unlock with Touch ID (macOS)
 
-In den Einstellungen einschalten; beim nächsten Start fragt ConnMgr nach dem Fingerabdruck (nach manuellem Sperren per Knopf 👆). Das Master-Passwort funktioniert immer weiter, „Passwort eingeben“ in der Touch-ID-Abfrage führt dorthin.
+Enable it in the settings. On the next start ConnMgr asks for your fingerprint; after locking manually, use the 👆 button. The master password always keeps working, and "Enter Password" in the Touch ID prompt leads there.
 
-- Im **Anmelde-Schlüsselbund** liegt der Schlüssel der Verbindungsdatei (nicht das Master-Passwort), nur für ConnMgr ohne Rückfrage lesbar.
-- **Einschränkung:** Einträge, bei denen macOS selbst den Fingerabdruck erzwingt, sind Apps mit Apple-Developer-ID vorbehalten (sonst Fehler -34018). Hier erzwingt ConnMgr die Abfrage; ein Schadprogramm, das bereits unter deinem Benutzer läuft und die Signatur von ConnMgr fälscht, käme ohne Fingerabdruck an den Schlüssel.
-- Ändert sich das Master-Passwort, wird der gespeicherte Schlüssel mitgezogen; passt er nicht mehr (z. B. Datei woanders geändert), verwirft ConnMgr ihn und verlangt das Passwort.
+- The **login keychain** holds the connection file's key (not the master password). ConnMgr can read it without a prompt; other apps cannot.
+- **Limitation:** keychain items where macOS itself enforces the fingerprint are reserved for apps with an Apple Developer ID (otherwise error -34018). ConnMgr enforces the prompt itself instead. Malware already running under your user account that forges ConnMgr's signature could therefore get the key without a fingerprint.
+- When the master password changes, the stored key is updated too. If it no longer matches (e.g. the file was changed elsewhere), ConnMgr discards it and asks for the password.
 
-## Verschlüsselung
+## Encryption
 
-- Aus dem **Master-Passwort** wird per **Argon2id** (zufälliges Salt) ein 256-Bit-Schlüssel abgeleitet.
-- Jedes Geheimnis (Passwort, privater Schlüssel, Passphrase) wird einzeln mit **AES-256-GCM** und eigener Zufalls-Nonce verschlüsselt. Associated Data ist die ID des Eintrags plus das Feld – Chiffrate lassen sich weder zwischen Einträgen noch zwischen Feldern vertauschen.
-- `verifier` ist ein verschlüsselter bekannter Text, mit dem das Master-Passwort beim Entsperren geprüft wird.
-- Der Schlüssel liegt nur im Speicher und wird beim Sperren/Beenden genullt. Die Datei wird atomar und (Unix) mit Rechten `0600` geschrieben.
+- A 256-bit key is derived from the **master password** with **Argon2id** (random salt).
+- Each secret (password, private key, passphrase) is encrypted separately with **AES-256-GCM** and its own random nonce. The associated data is the entry's ID plus the field, so ciphertexts cannot be swapped between entries or between fields.
+- `verifier` is an encrypted known text used to check the master password when unlocking.
+- The key is kept only in memory and zeroed on lock/exit. The file is written atomically and (on Unix) with `0600` permissions.
 
-## Externe Clients
+## External clients
 
-Über „Extern“ (bei RDP immer) startet ConnMgr die Clients des Betriebssystems:
+Via "External" or the context menu, ConnMgr launches the operating system's clients:
 
-| Typ  | macOS | Linux | Windows |
+| Type | macOS | Linux | Windows |
 |------|-------|-------|---------|
-| SSH  | `ssh` in Terminal.app | `ssh` im Terminal-Emulator | `ssh` (OpenSSH-Client) |
-| SFTP | `sftp` in Terminal.app | `sftp` im Terminal-Emulator | `sftp` |
-| RDP  | `.rdp`-Datei → „Windows App“ | `xfreerdp3`/`xfreerdp` (mit Passwort) | `mstsc` (Passwort via `cmdkey`) |
-| VNC  | Bildschirmfreigabe (`vnc://`) | `vncviewer` | `vncviewer` (TigerVNC) |
+| SSH  | `ssh` in Terminal.app | `ssh` in a terminal emulator | `ssh` (OpenSSH client) |
+| SFTP | `sftp` in Terminal.app | `sftp` in a terminal emulator | `sftp` |
+| RDP  | `.rdp` file → "Windows App" | `xfreerdp3`/`xfreerdp` (with password) | `mstsc` (password via `cmdkey`) |
+| VNC  | Screen Sharing (`vnc://`) | `vncviewer` | `vncviewer` (TigerVNC) |
 
-**SSH/SFTP:** ConnMgr übergibt das Passwort über `SSH_ASKPASS` (OpenSSH ≥ 8.4). Die App vergibt pro Verbindung ein einmaliges, 2 Minuten gültiges Token und liefert das Passwort über einen nur lokal erreichbaren Socket (127.0.0.1) an ssh – es steht weder auf der Kommandozeile noch in einer Datei. Andere Rückfragen (Host-Key bestätigen, Schlüssel-Passphrase, erneute Eingabe nach falschem Passwort) erscheinen ganz normal im Terminal.
+**SSH/SFTP:** ConnMgr passes the password via `SSH_ASKPASS` (OpenSSH ≥ 8.4).
+- **How:** for each connection, the app issues a one-time token valid for 2 minutes and serves the password to ssh over a local-only socket (127.0.0.1).
+- **Never written down:** the password never appears on the command line or in a file.
+- **Other prompts** appear in the terminal as usual: confirming a host key, the key passphrase, re-entry after a wrong password.
 
-Wo der Client kein Passwort übernehmen kann (VNC, RDP unter macOS), kopiert ConnMgr es beim Verbinden in die Zwischenablage und löscht es dort nach 30 Sekunden wieder.
+Where the client cannot accept a password (VNC, RDP on macOS), ConnMgr copies it to the clipboard on connect and clears it there after 30 seconds.
 
-Hinweis Windows/RDP: `cmdkey` legt die Anmeldedaten dauerhaft in der Windows-Anmeldeinformationsverwaltung ab.
+Note for Windows/RDP: `cmdkey` stores the credentials permanently in the Windows Credential Manager.
