@@ -26,7 +26,7 @@ impl TerminalView {
         let mut out = TabResponse::default();
         let status = session.conn().status();
         let font = FontId::monospace(FONT_SIZE);
-        let (cell_w, cell_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let (cell_w, cell_h) = ui.fonts(|f| (cell_width(f, &font), f.row_height(&font)));
 
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -136,6 +136,15 @@ fn paint_screen(
     focused: bool,
 ) {
     let font = FontId::monospace(FONT_SIZE);
+    // Zeichen mit anderem Vorschub (Ersatzschriften) einzeln setzen, damit sie das Raster nicht verschieben.
+    let fits_grid = |c: &vt100::Cell| {
+        let contents = c.contents();
+        contents.is_ascii()
+            || painter.ctx().fonts(|f| {
+                let base = f.glyph_width(&font, 'M');
+                contents.chars().all(|ch| (f.glyph_width(&font, ch) - base).abs() < 0.01)
+            })
+    };
     let selection = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
     let is_selected = |row: u16, col: u16| selection.is_some_and(|(s, e)| (row, col) >= s && (row, col) <= e);
 
@@ -149,7 +158,8 @@ fn paint_screen(
             let mut text = String::new();
             while col < cols {
                 let cell = screen.cell(row, col);
-                if col > start && (cell_style(cell, is_selected(row, col)) != style || cell.is_some_and(|c| c.is_wide())) {
+                let alone = cell.is_some_and(|c| c.is_wide() || !fits_grid(c));
+                if col > start && (cell_style(cell, is_selected(row, col)) != style || alone) {
                     break;
                 }
                 match cell {
@@ -158,7 +168,7 @@ fn paint_screen(
                     _ => text.push(' '),
                 }
                 col += 1;
-                if cell.is_some_and(|c| c.is_wide()) {
+                if alone {
                     break;
                 }
             }
@@ -186,6 +196,15 @@ fn paint_screen(
             painter.rect_stroke(cursor, 0.0, Stroke::new(1.0_f32, FOREGROUND));
         }
     }
+}
+
+/// Zellbreite so, wie egui einen Textlauf tatsächlich setzt: Der Vorschub jedes Zeichens wird
+/// auf ganze Pixel gerundet, `glyph_width` liefert dagegen den ungerundeten Wert. Mit diesem
+/// wanderten lange Läufe (z. B. die Panels von mc) aus dem Raster.
+fn cell_width(fonts: &egui::text::Fonts, font: &FontId) -> f32 {
+    const SAMPLE: usize = 64;
+    let galley = fonts.layout_no_wrap("M".repeat(SAMPLE), font.clone(), Color32::WHITE);
+    galley.size().x / SAMPLE as f32
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -308,6 +327,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runs_stay_on_grid() {
+        // Eine Zeile wie in den Panels von mc muss genau so breit gesetzt werden wie ihre Zellen.
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let font = FontId::monospace(FONT_SIZE);
+        ctx.fonts(|f| {
+            let cell = cell_width(f, &font);
+            let line = format!("│/.cache{}│   80│Oct 23 14:11│ .bash_history ─┌┐└┘", " ".repeat(120));
+            let galley = f.layout_no_wrap(line.clone(), font.clone(), Color32::WHITE);
+            let expected = line.chars().count() as f32 * cell;
+            assert!((galley.size().x - expected).abs() < 0.5, "Lauf {} px, Raster {expected} px", galley.size().x);
+        });
+    }
+
+    #[test]
     fn keys() {
         let none = Modifiers::NONE;
         assert_eq!(key_bytes(Key::Enter, none, false).unwrap(), b"\r");
@@ -332,3 +366,4 @@ mod tests {
         assert_eq!(color(vt100::Color::Default, FOREGROUND, false), FOREGROUND);
     }
 }
+
