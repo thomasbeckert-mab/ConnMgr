@@ -210,3 +210,9 @@ Via "External" or the context menu, ConnMgr launches the operating system's clie
 Where the client cannot accept a password (VNC, RDP on macOS), ConnMgr copies it to the clipboard on connect and clears it there after 30 seconds.
 
 Note for Windows/RDP: `cmdkey` stores the credentials permanently in the Windows Credential Manager.
+
+## License
+
+Copyright 2026 Thomas Beckert
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.

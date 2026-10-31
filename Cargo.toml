@@ -2,7 +2,9 @@
 name = "connmgr"
 version = "0.1.0"
 edition = "2021"
-description = "Plattformübergreifender Verbindungsmanager für SSH, SFTP, RDP und VNC"
+description = "Cross-platform connection manager for SSH, SFTP, RDP, VNC and Omnissa Horizon"
+license = "Apache-2.0"
+repository = "https://github.com/thomasbeckert-mab/ConnMgr"
 
 [dependencies]
 aes-gcm = "0.10"
