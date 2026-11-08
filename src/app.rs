@@ -1258,7 +1258,8 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             // Menü ganz links, danach die Schnellverbindung, damit beides auch bei schmalem Fenster sichtbar bleibt.
-            ui.menu_button("☰", |ui| {
+            let menu = egui::Button::new(egui::RichText::new("☰").size(18.0));
+            square_slot(ui, |ui| egui::menu::menu_custom_button(ui, menu, |ui| {
                 menu_item(ui, ts!("⚙ Einstellungen …", "⚙ Settings …"), &mut action, || Action::OpenDialog(Dialog::Settings));
                 ui.separator();
                 menu_item(ui, ts!("Master-Passwort ändern …", "Change master password …"), &mut action, || Action::OpenDialog(Dialog::change_master()));
@@ -1271,7 +1272,7 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                         action = Some(Action::OpenDialog(Dialog::Import { path, password: Zeroizing::default(), error: None }));
                     }
                 }
-            });
+            }));
             ui.separator();
             quick_connect_field(ui, s, &mut action);
             ui.separator();
@@ -1606,19 +1607,25 @@ fn tree_ui(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
     });
 }
 
+/// Quadratischer 32×32-Platz, in dem ein Knopf ihn ganz füllt und sein Zeichen mittig steht
+/// (egui richtet den Text eines Knopfs nach dem Layout aus, sonst steht er links).
+fn square_slot<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let layout = egui::Layout::centered_and_justified(egui::Direction::TopDown);
+    ui.allocate_ui_with_layout(egui::vec2(32.0, 32.0), layout, add).inner
+}
+
 const TREE_OVERLAY_WIDTH: f32 = 300.0;
 const TREE_HIDE_DELAY: Duration = Duration::from_millis(400);
 
 /// Nicht fixierter Baum: schmale Leiste am linken Rand; beim Darüberfahren schwebt der Baum
 /// über dem Inhalt (die Sitzung behält ihre Größe) und verschwindet wieder, wenn die Maus ihn verlässt.
 fn tree_overlay(ctx: &egui::Context, s: &mut Session, action: &mut Option<Action>) {
-    let strip = egui::SidePanel::left("tree_strip").exact_width(40.0).resizable(false).show(ctx, |ui| {
-        ui.vertical_centered(|ui| {
-            let button = egui::Button::new(egui::RichText::new("»").size(22.0)).min_size(egui::vec2(32.0, 40.0));
-            if ui.add(button).on_hover_text(ts!("Verbindungen einblenden", "Show connections")).clicked() {
-                s.tree_overlay = true;
-            }
-        });
+    // Gleicher Innenrand wie die Werkzeugleiste: Der Knopf steht genau unter dem Menü ☰.
+    let strip = egui::SidePanel::left("tree_strip").exact_width(48.0).resizable(false).show(ctx, |ui| {
+        let button = egui::Button::new(egui::RichText::new("»").size(20.0));
+        if square_slot(ui, |ui| ui.add(button)).on_hover_text(ts!("Verbindungen einblenden", "Show connections")).clicked() {
+            s.tree_overlay = true;
+        }
     });
     if strip.response.contains_pointer() {
         s.tree_overlay = true;
@@ -2641,6 +2648,7 @@ mod tests {
         assert!(ui.has("»") && !ui.has("lonely"), "nur die Leiste sichtbar");
 
         let strip = ui.find("»");
+        assert!((strip.x - ui.find("☰").x).abs() < 0.5, "» steht genau unter ☰");
         ui.events.push(egui::Event::PointerMoved(strip));
         ui.frame(&mut s);
         ui.frame(&mut s);
