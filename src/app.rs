@@ -1273,7 +1273,8 @@ fn session_ui(ctx: &egui::Context, s: &mut Session, status: &str, path: &Path) -
                     }
                 }
             }));
-            ui.separator();
+            let line = ui.separator().rect.center().x;
+            ui.ctx().data_mut(|d| d.insert_temp(menu_line_id(), line));
             quick_connect_field(ui, s, &mut action);
             ui.separator();
             let parent = s.default_parent();
@@ -1607,6 +1608,11 @@ fn tree_ui(ui: &mut egui::Ui, s: &Session, action: &mut Option<Action>) {
     });
 }
 
+/// Speicherplatz für die x-Position des Trennstrichs hinter dem Menü ☰.
+fn menu_line_id() -> egui::Id {
+    egui::Id::new("menu_line_x")
+}
+
 /// Quadratischer 32×32-Platz, in dem ein Knopf ihn ganz füllt und sein Zeichen mittig steht
 /// (egui richtet den Text eines Knopfs nach dem Layout aus, sonst steht er links).
 fn square_slot<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -1620,8 +1626,11 @@ const TREE_HIDE_DELAY: Duration = Duration::from_millis(400);
 /// Nicht fixierter Baum: schmale Leiste am linken Rand; beim Darüberfahren schwebt der Baum
 /// über dem Inhalt (die Sitzung behält ihre Größe) und verschwindet wieder, wenn die Maus ihn verlässt.
 fn tree_overlay(ctx: &egui::Context, s: &mut Session, action: &mut Option<Action>) {
-    // Gleicher Innenrand wie die Werkzeugleiste: Der Knopf steht genau unter dem Menü ☰.
-    let strip = egui::SidePanel::left("tree_strip").exact_width(48.0).resizable(false).show(ctx, |ui| {
+    // Gleicher Innenrand wie die Werkzeugleiste: Der Knopf steht genau unter dem Menü ☰,
+    // und der rechte Rand der Leiste setzt den Trennstrich hinter dem Menü fort.
+    // egui zeichnet den Rand einer linken Leiste einen Punkt links von ihrer Kante.
+    let line = ctx.data(|d| d.get_temp::<f32>(menu_line_id())).unwrap_or(52.0);
+    let strip = egui::SidePanel::left("tree_strip").exact_width(line + 1.0 - ctx.screen_rect().left()).resizable(false).show(ctx, |ui| {
         let button = egui::Button::new(egui::RichText::new("»").size(20.0));
         if square_slot(ui, |ui| ui.add(button)).on_hover_text(ts!("Verbindungen einblenden", "Show connections")).clicked() {
             s.tree_overlay = true;
@@ -2649,6 +2658,9 @@ mod tests {
 
         let strip = ui.find("»");
         assert!((strip.x - ui.find("☰").x).abs() < 0.5, "» steht genau unter ☰");
+        let line = ui.ctx.data(|d| d.get_temp::<f32>(menu_line_id())).unwrap();
+        let strip_right = egui::containers::panel::PanelState::load(&ui.ctx, egui::Id::new("tree_strip")).unwrap().rect.right();
+        assert!((line - (strip_right - 1.0)).abs() < 0.5, "Rand der Leiste ({strip_right} − 1) setzt den Trennstrich ({line}) fort");
         ui.events.push(egui::Event::PointerMoved(strip));
         ui.frame(&mut s);
         ui.frame(&mut s);
