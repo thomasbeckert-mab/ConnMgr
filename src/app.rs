@@ -1612,9 +1612,10 @@ const TREE_HIDE_DELAY: Duration = Duration::from_millis(400);
 /// Nicht fixierter Baum: schmale Leiste am linken Rand; beim Darüberfahren schwebt der Baum
 /// über dem Inhalt (die Sitzung behält ihre Größe) und verschwindet wieder, wenn die Maus ihn verlässt.
 fn tree_overlay(ctx: &egui::Context, s: &mut Session, action: &mut Option<Action>) {
-    let strip = egui::SidePanel::left("tree_strip").exact_width(26.0).resizable(false).show(ctx, |ui| {
+    let strip = egui::SidePanel::left("tree_strip").exact_width(40.0).resizable(false).show(ctx, |ui| {
         ui.vertical_centered(|ui| {
-            if ui.button("»").on_hover_text(ts!("Verbindungen einblenden", "Show connections")).clicked() {
+            let button = egui::Button::new(egui::RichText::new("»").size(22.0)).min_size(egui::vec2(32.0, 40.0));
+            if ui.add(button).on_hover_text(ts!("Verbindungen einblenden", "Show connections")).clicked() {
                 s.tree_overlay = true;
             }
         });
