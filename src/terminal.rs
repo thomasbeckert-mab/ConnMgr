@@ -10,12 +10,16 @@ const BACKGROUND: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
 const FOREGROUND: Color32 = Color32::from_rgb(0xd4, 0xd4, 0xd4);
 const SELECTION: Color32 = Color32::from_rgb(0x26, 0x4f, 0x78);
 
+/// Zelle als (Zeile, Spalte); Zeile relativ zur obersten Zeile des aktuellen Bildschirms.
+type Point = (i64, u16);
+
 /// Zustand der Ansicht, der nicht zum Bildschirminhalt gehört.
 #[derive(Default)]
 pub struct TerminalView {
     size: (u16, u16),
-    /// Markierung in sichtbaren Zellen (Zeile, Spalte), Anfang und Ende in Zugreihenfolge.
-    selection: Option<((u16, u16), (u16, u16))>,
+    /// Markierung von Anfang bis Ende in Zugreihenfolge. Zeilen zählen ab der obersten Zeile des
+    /// aktuellen Bildschirms; negative Zeilen liegen im Verlauf, so reicht die Markierung über ihn hinaus.
+    selection: Option<(Point, Point)>,
     scroll_remainder: f32,
     focus_requested: bool,
     overlay: ConnOverlay,
@@ -51,25 +55,36 @@ impl TerminalView {
             ui.ctx().set_cursor_icon(CursorIcon::Text);
         }
 
-        let cell_at = |pos: Pos2| -> (u16, u16) {
+        let mut parser = session.parser();
+
+        let cell_at = |pos: Pos2, scrollback: usize| -> Point {
             let col = ((pos.x - rect.left()) / cell_w).floor().clamp(0.0, f32::from(cols - 1)) as u16;
-            let row = ((pos.y - rect.top()) / cell_h).floor().clamp(0.0, f32::from(rows - 1)) as u16;
-            (row, col)
+            let row = ((pos.y - rect.top()) / cell_h).floor().clamp(0.0, f32::from(rows - 1)) as i64;
+            (row - scrollback as i64, col)
         };
         if response.drag_started() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let cell = cell_at(pos);
+                let cell = cell_at(pos, parser.screen().scrollback());
                 self.selection = Some((cell, cell));
             }
         } else if response.dragged() {
             if let (Some(pos), Some((start, _))) = (response.interact_pointer_pos(), self.selection) {
-                self.selection = Some((start, cell_at(pos)));
+                // Über den Rand hinaus ziehen blättert, damit die Markierung über den sichtbaren Teil hinausreicht.
+                let screen = parser.screen_mut();
+                let scrollback = screen.scrollback();
+                if pos.y < rect.top() {
+                    screen.set_scrollback(scrollback + 1);
+                } else if pos.y > rect.bottom() && scrollback > 0 {
+                    screen.set_scrollback(scrollback - 1);
+                }
+                if pos.y < rect.top() || pos.y > rect.bottom() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+                }
+                self.selection = Some((start, cell_at(pos, screen.scrollback())));
             }
         } else if response.clicked() {
             self.selection = None;
         }
-
-        let mut parser = session.parser();
 
         // Mausrad blättert im Verlauf (nicht im Vollbildmodus von vim, less & Co.).
         if response.hovered() && !parser.screen().alternate_screen() {
@@ -84,13 +99,14 @@ impl TerminalView {
         }
 
         if focused && matches!(status, Status::Connected) {
+            let events = ui.input(|i| i.events.clone());
+            let selected_text = match self.selection {
+                Some(selection) if events.iter().any(|e| matches!(e, Event::Copy)) => Some(selection_text(parser.screen_mut(), selection)),
+                _ => None,
+            };
             let screen = parser.screen();
-            let selected_text = self.selection.map(|(a, b)| {
-                let (start, end) = if a <= b { (a, b) } else { (b, a) };
-                screen.contents_between(start.0, start.1, end.0, end.1 + 1)
-            });
             let mut input = Vec::new();
-            for event in ui.input(|i| i.events.clone()) {
+            for event in events {
                 match event {
                     Event::Copy => match &selected_text {
                         Some(text) if !text.is_empty() => ui.ctx().copy_text(text.clone()),
@@ -132,7 +148,7 @@ fn paint_screen(
     origin: Pos2,
     (cell_w, cell_h): (f32, f32),
     (rows, cols): (u16, u16),
-    selection: Option<((u16, u16), (u16, u16))>,
+    selection: Option<(Point, Point)>,
     focused: bool,
 ) {
     let font = FontId::monospace(FONT_SIZE);
@@ -146,7 +162,11 @@ fn paint_screen(
             })
     };
     let selection = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
-    let is_selected = |row: u16, col: u16| selection.is_some_and(|(s, e)| (row, col) >= s && (row, col) <= e);
+    let offset = screen.scrollback() as i64;
+    let is_selected = |row: u16, col: u16| {
+        let cell = (i64::from(row) - offset, col);
+        selection.is_some_and(|(s, e)| cell >= s && cell <= e)
+    };
 
     for row in 0..rows {
         let y = origin.y + f32::from(row) * cell_h;
@@ -196,6 +216,31 @@ fn paint_screen(
             painter.rect_stroke(cursor, 0.0, Stroke::new(1.0_f32, FOREGROUND));
         }
     }
+}
+
+/// Text der Markierung, auch soweit sie im Verlauf außerhalb der Anzeige liegt. vt100 liest nur
+/// den gerade sichtbaren Ausschnitt, daher wird je Zeile dorthin geblättert und danach zurück.
+fn selection_text(screen: &mut vt100::Screen, (a, b): (Point, Point)) -> String {
+    let (start, end) = if a <= b { (a, b) } else { (b, a) };
+    let (_, cols) = screen.size();
+    let saved = screen.scrollback();
+    let mut text = String::new();
+    for line in start.0..=end.0 {
+        let back = usize::try_from(-line).unwrap_or(0);
+        screen.set_scrollback(back);
+        if screen.scrollback() != back {
+            continue; // älter als der gespeicherte Verlauf
+        }
+        let row = (line + back as i64) as u16;
+        let first = if line == start.0 { start.1 } else { 0 };
+        let last = if line == end.0 { end.1 + 1 } else { cols };
+        text.push_str(&screen.contents_between(row, first, row, last));
+        if line != end.0 && !screen.row_wrapped(row) {
+            text.push('\n');
+        }
+    }
+    screen.set_scrollback(saved);
+    text
 }
 
 /// Zellbreite so, wie egui einen Textlauf tatsächlich setzt: Der Vorschub jedes Zeichens wird
@@ -325,6 +370,20 @@ fn key_bytes(key: Key, modifiers: Modifiers, application_cursor: bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_reaches_into_scrollback() {
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        for i in 1..=8 {
+            parser.process(format!("zeile {i}\r\n").as_bytes());
+        }
+        // Sichtbar: "zeile 7", "zeile 8", leer. Zeile −4 ist "zeile 3".
+        let screen = parser.screen_mut();
+        assert_eq!(selection_text(screen, ((1, 6), (-4, 0))), "zeile 3\nzeile 4\nzeile 5\nzeile 6\nzeile 7\nzeile 8");
+        assert_eq!(selection_text(screen, ((-1, 2), (0, 4))), "ile 6\nzeile");
+        assert_eq!(screen.scrollback(), 0, "Ansicht bleibt, wo sie war");
+        assert_eq!(selection_text(screen, ((-500, 0), (-6, 6))), "zeile 1", "älter als der Verlauf wird übersprungen");
+    }
 
     #[test]
     fn runs_stay_on_grid() {
