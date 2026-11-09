@@ -2435,6 +2435,25 @@ mod tests {
     }
 
     #[test]
+    fn properties_open_for_every_protocol() {
+        for protocol in Protocol::ALL {
+            let mut s = session();
+            if let Some(Node::Connection(c)) = model::find_mut(&mut s.store.items, "lonely") {
+                c.protocol = protocol;
+                c.port = protocol.default_port();
+            }
+            let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
+            ui.frame(&mut s);
+            ui.frame(&mut s);
+            ui.click(&mut s, "lonely", egui::PointerButton::Secondary);
+            ui.frame(&mut s);
+            assert_eq!(ui.click(&mut s, "📝 Eigenschaften", egui::PointerButton::Primary).as_deref(), Some("Edit"), "{protocol:?}");
+            ui.frame(&mut s);
+            assert!(ui.has("💾 Speichern"), "Editor sichtbar bei {protocol:?}");
+        }
+    }
+
+    #[test]
     fn properties_only_via_context_menu_and_closable() {
         let mut s = session();
         let mut ui = UiDriver::new(std::env::temp_dir().join("unbenutzt.json"));
